@@ -40,7 +40,7 @@ export const DEFAULT_SCORE_OPTIONS: ScoreOptions = {
   costFloor: 1,
   costPower: 1,
   sort: "score",
-  frontierOnly: true,
+  frontierOnly: false,
   limit: 100,
 };
 
