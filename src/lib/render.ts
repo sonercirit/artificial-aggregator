@@ -39,7 +39,7 @@ export function normalizeTheme(value: string | null | undefined): ThemeValue {
 
 const HELP = {
   theme: "Switch the UI color palette. Your selection is saved in this browser.",
-  run: "Choose a stored fetch snapshot. Leave as latest to use the newest successful hourly run.",
+  run: "Choose a stored fetch snapshot. Leave as latest to use the newest successful run with score/cost data.",
   mode: "The quality dimension used for ranking: combined averages AA intelligence, coding, and agentic scores when available.",
   calc: "How the final score is computed: raw ignores cost, sub subtracts a logarithmic cost penalty, and div divides quality by cost^power.",
   sort: "Column used to rank the comparison table and historic #1 winner timeline.",
@@ -112,7 +112,7 @@ export function renderHome(
 
   const intro = run
     ? `<p class="muted">Snapshot ${link(`/runs/${run.id}`, `#${run.id}`)} fetched ${formatDateTime(run.completed_at ?? run.started_at)} · ${formatBytes(run.html_bytes)} raw HTML · ${run.result_count} models</p>`
-    : `<p class="notice">No successful fetch runs yet. Apply migrations, then wait for the hourly cron or trigger <code>POST /admin/fetch</code>.</p>`;
+    : `<p class="notice">No scoreable fetch runs yet. Apply migrations, then wait for the hourly cron or trigger <code>POST /admin/fetch</code>.</p>`;
 
   return layout(
     "Scores",
@@ -302,7 +302,7 @@ function renderScoreForm(
 ): string {
   const runControl = `<label>${labelWithTip("Run", HELP.run)}
       <select name="run">
-        <option value="">Latest successful</option>
+        <option value="">Latest scoreable</option>
         ${runs
           .map(
             (run) =>

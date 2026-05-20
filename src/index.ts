@@ -57,7 +57,7 @@ app.get("/", async (c) => {
   const context = getRenderContext(c.req.raw);
   const options = parseScoreOptions(url.searchParams);
   const requestedRunId = positiveInt(url.searchParams.get("run"));
-  const runs = await getRuns(c.env, 50);
+  const runs = await getRuns(c.env, 250);
   const run = requestedRunId
     ? await getRun(c.env, requestedRunId)
     : await getLatestSuccessfulRun(c.env);

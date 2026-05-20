@@ -1,5 +1,5 @@
 export const ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/models";
-export const PARSER_VERSION = "aa-next-rsc-v1";
+export const PARSER_VERSION = "aa-next-rsc-default-data-v2";
 
 export const MODES = ["combined", "coding", "intelligence", "agentic", "mmmu"] as const;
 export type Mode = (typeof MODES)[number];
@@ -89,32 +89,26 @@ export type ScoreResult<T extends ParsedModelResult = ParsedModelResult> = {
 };
 
 export function parseHtmlToResults(html: string): ParsedModelResult[] {
-  return extractModelsFromHtml(html)
+  const results = extractModelsFromHtml(html)
     .map(normalizeModel)
     .filter((model) => {
       return model.modelKey.length > 0 && model.name.length > 0;
     });
+
+  if (results.length > 0 && !results.some(isScoreableResult)) {
+    throw new Error("Parsed Artificial Analysis payload did not include score/cost fields");
+  }
+
+  return results;
 }
 
 export function extractModelsFromHtml(html: string): unknown[] {
-  const escapedMarkers = ['\\",\\"models\\":[{', '\\"models\\":[{'];
+  const defaultData = extractArrayFromHtmlPayload(html, "defaultData");
+  if (defaultData && defaultData.some(hasModelScoreFields)) return defaultData;
 
-  for (const marker of escapedMarkers) {
-    const position = html.indexOf(marker);
-    if (position === -1) continue;
-
-    // The first marker includes the escaped leading `","`; skip it so the
-    // decoded text starts at `"models":[` just like the original CLI did.
-    const start = marker.startsWith('\\",') ? position + 4 : position;
-    const clean = html.slice(start).replaceAll('\\"', '"').replaceAll("\\\\", "\\");
-
-    return parseModelsArrayFromCleanPayload(clean);
-  }
-
-  const rawPosition = html.indexOf('"models":[{');
-  if (rawPosition !== -1) {
-    return parseModelsArrayFromCleanPayload(html.slice(rawPosition));
-  }
+  const models = extractArrayFromHtmlPayload(html, "models");
+  if (models) return models;
+  if (defaultData) return defaultData;
 
   throw new Error("Could not find Artificial Analysis models payload in HTML");
 }
@@ -266,11 +260,31 @@ export function scoreOptionsToSearchParams(options: ScoreOptions): URLSearchPara
   return params;
 }
 
-function parseModelsArrayFromCleanPayload(clean: string): unknown[] {
-  const key = '"models":[';
+function extractArrayFromHtmlPayload(html: string, keyName: string): unknown[] | null {
+  const markers = [`\\",\\"${keyName}\\":[{`, `\\"${keyName}\\":[{`, `"${keyName}":[{`];
+
+  for (const marker of markers) {
+    const position = html.indexOf(marker);
+    if (position === -1) continue;
+
+    // The first marker includes the escaped leading `","`; skip it so the
+    // decoded text starts at `"keyName":[` just like the original CLI did.
+    const start = marker.startsWith('\\",') ? position + 4 : position;
+    const clean = html.slice(start).replaceAll('\\"', '"').replaceAll("\\\\", "\\");
+
+    return parseArrayFromCleanPayload(clean, keyName);
+  }
+
+  return null;
+}
+
+function parseArrayFromCleanPayload(clean: string, keyName: string): unknown[] {
+  const key = `"${keyName}":[`;
   const keyPosition = clean.indexOf(key);
   if (keyPosition === -1) {
-    throw new Error("Found models marker, but decoded payload did not contain a models array");
+    throw new Error(
+      `Found ${keyName} marker, but decoded payload did not contain a ${keyName} array`,
+    );
   }
 
   const arrayStart = keyPosition + key.length - 1;
@@ -292,52 +306,74 @@ function parseModelsArrayFromCleanPayload(clean: string): unknown[] {
     } else if (char === "]") {
       depth--;
       if (depth === 0) {
-        const modelsJson = clean
+        const arrayJson = clean
           .slice(arrayStart, i + 1)
           .replace(/"\$undefined"/g, "null")
           .replace(/"\$NaN"/g, "null");
-        const parsed = JSON.parse(modelsJson);
+        const parsed = JSON.parse(arrayJson);
         if (!Array.isArray(parsed)) {
-          throw new Error("Artificial Analysis models payload was not an array");
+          throw new Error(`Artificial Analysis ${keyName} payload was not an array`);
         }
         return parsed;
       }
     }
   }
 
-  throw new Error("Could not find the end of the Artificial Analysis models array");
+  throw new Error(`Could not find the end of the Artificial Analysis ${keyName} array`);
 }
 
 function normalizeModel(input: unknown): ParsedModelResult {
   const model = asRecord(input);
-  const cost = asRecord(model.intelligence_index_cost);
-  const creator = asRecord(model.model_creators);
+  const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
+  const creator = firstRecord(model.model_creators, model.creator);
   const sourceId = stringOrNull(model.id);
   const slug = stringOrNull(model.slug);
-  const name = stringOrNull(model.name) ?? stringOrNull(model.short_name) ?? slug ?? sourceId ?? "";
+  const shortName = stringOrNull(model.short_name) ?? stringOrNull(model.shortName);
+  const name = stringOrNull(model.name) ?? shortName ?? slug ?? sourceId ?? "";
   const modelKey = slug ?? sourceId ?? slugify(name);
+  const releaseDate = stringOrNull(model.release_date) ?? stringOrNull(model.releaseDate);
+  const cutoffDate =
+    stringOrNull(model.knowledge_cutoff_date) ?? stringOrNull(model.knowledgeCutoffDate);
+  const totalCost = numberOrNull(cost.total_cost) ?? numberOrNull(cost.totalCost);
+  const inputCost = numberOrNull(cost.input_cost) ?? numberOrNull(cost.inputCost);
+  const outputCost = numberOrNull(cost.output_cost) ?? numberOrNull(cost.outputCost);
+  const reasoningCost = numberOrNull(cost.reasoning_cost) ?? numberOrNull(cost.reasoningCost);
+  const answerCost = numberOrNull(cost.answer_cost) ?? numberOrNull(cost.answerCost);
+  const intelligence =
+    numberOrNull(model.intelligence_index) ?? numberOrNull(model.intelligenceIndex);
+  const coding = numberOrNull(model.coding_index) ?? numberOrNull(model.codingIndex);
+  const agentic = numberOrNull(model.agentic_index) ?? numberOrNull(model.agenticIndex);
+  const mmmu = numberOrNull(model.mmmu_pro) ?? numberOrNull(model.mmmuPro);
+  const priceInput1m =
+    numberOrNull(model.price_1m_input_tokens) ?? numberOrNull(model.priceInput1m);
+  const priceOutput1m =
+    numberOrNull(model.price_1m_output_tokens) ?? numberOrNull(model.priceOutput1m);
+  const activeParams =
+    numberOrNull(model.activeParams) ?? numberOrNull(model.inference_parameters_active_billions);
+  const isOpenWeights = booleanOrNull(model.is_open_weights) ?? booleanOrNull(model.isOpenWeights);
+  const isReasoning = booleanOrNull(model.reasoning_model) ?? booleanOrNull(model.isReasoning);
 
   const rawResult = {
     id: sourceId,
     slug,
-    model_url: stringOrNull(model.model_url),
-    hosts_url: stringOrNull(model.hosts_url),
+    model_url: stringOrNull(model.model_url) ?? stringOrNull(model.modelUrl),
+    hosts_url: stringOrNull(model.hosts_url) ?? stringOrNull(model.hostsUrl),
     name,
-    short_name: stringOrNull(model.short_name),
+    short_name: shortName,
     creator_name: stringOrNull(creator.name),
     creator_slug: stringOrNull(creator.slug),
-    release_date: stringOrNull(model.release_date),
-    knowledge_cutoff_date: stringOrNull(model.knowledge_cutoff_date),
-    intelligence_index: numberOrNull(model.intelligence_index),
-    coding_index: numberOrNull(model.coding_index),
-    agentic_index: numberOrNull(model.agentic_index),
-    mmmu_pro: numberOrNull(model.mmmu_pro),
+    release_date: releaseDate,
+    knowledge_cutoff_date: cutoffDate,
+    intelligence_index: intelligence,
+    coding_index: coding,
+    agentic_index: agentic,
+    mmmu_pro: mmmu,
     intelligence_index_cost: cost,
-    price_1m_input_tokens: numberOrNull(model.price_1m_input_tokens),
-    price_1m_output_tokens: numberOrNull(model.price_1m_output_tokens),
-    activeParams: numberOrNull(model.activeParams),
-    is_open_weights: booleanOrNull(model.is_open_weights),
-    reasoning_model: booleanOrNull(model.reasoning_model),
+    price_1m_input_tokens: priceInput1m,
+    price_1m_output_tokens: priceOutput1m,
+    activeParams,
+    is_open_weights: isOpenWeights,
+    reasoning_model: isReasoning,
   };
 
   return {
@@ -345,25 +381,25 @@ function normalizeModel(input: unknown): ParsedModelResult {
     sourceId,
     slug,
     name,
-    shortName: stringOrNull(model.short_name),
+    shortName,
     creatorName: stringOrNull(creator.name),
     creatorSlug: stringOrNull(creator.slug),
-    releaseDate: stringOrNull(model.release_date),
-    cutoffDate: stringOrNull(model.knowledge_cutoff_date),
-    totalCost: numberOrNull(cost.total_cost),
-    inputCost: numberOrNull(cost.input_cost),
-    outputCost: numberOrNull(cost.output_cost),
-    reasoningCost: numberOrNull(cost.reasoning_cost),
-    answerCost: numberOrNull(cost.answer_cost),
-    intelligence: numberOrNull(model.intelligence_index),
-    coding: numberOrNull(model.coding_index),
-    agentic: numberOrNull(model.agentic_index),
-    mmmu: numberOrNull(model.mmmu_pro),
-    priceInput1m: numberOrNull(model.price_1m_input_tokens),
-    priceOutput1m: numberOrNull(model.price_1m_output_tokens),
-    activeParams: numberOrNull(model.activeParams),
-    isOpenWeights: booleanOrNull(model.is_open_weights),
-    isReasoning: booleanOrNull(model.reasoning_model),
+    releaseDate,
+    cutoffDate,
+    totalCost,
+    inputCost,
+    outputCost,
+    reasoningCost,
+    answerCost,
+    intelligence,
+    coding,
+    agentic,
+    mmmu,
+    priceInput1m,
+    priceOutput1m,
+    activeParams,
+    isOpenWeights,
+    isReasoning,
     rawResultJson: JSON.stringify(rawResult),
   };
 }
@@ -428,6 +464,38 @@ function limitParam(params: URLSearchParams): number {
   return Number.isFinite(parsed) && parsed > 0
     ? Math.min(parsed, 10000)
     : DEFAULT_SCORE_OPTIONS.limit;
+}
+
+function isScoreableResult(result: ParsedModelResult): boolean {
+  return (
+    isNumber(result.totalCost) &&
+    result.totalCost > 0 &&
+    isNumber(result.intelligence) &&
+    isNumber(result.coding)
+  );
+}
+
+function hasModelScoreFields(input: unknown): boolean {
+  const model = asRecord(input);
+  const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
+
+  return (
+    numberOrNull(model.intelligence_index) != null ||
+    numberOrNull(model.intelligenceIndex) != null ||
+    numberOrNull(model.coding_index) != null ||
+    numberOrNull(model.codingIndex) != null ||
+    numberOrNull(cost.total_cost) != null ||
+    numberOrNull(cost.totalCost) != null
+  );
+}
+
+function firstRecord(...values: unknown[]): Record<string, unknown> {
+  for (const value of values) {
+    const record = asRecord(value);
+    if (Object.keys(record).length > 0) return record;
+  }
+
+  return {};
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

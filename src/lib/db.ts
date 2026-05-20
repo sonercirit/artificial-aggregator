@@ -329,6 +329,13 @@ export async function getLatestSuccessfulRun(env: Bindings): Promise<FetchRun | 
   return env.DB.prepare(
     `SELECT * FROM fetch_runs
      WHERE status = 'success'
+       AND EXISTS (
+         SELECT 1 FROM model_results mr
+         WHERE mr.run_id = fetch_runs.id
+           AND mr.total_cost > 0
+           AND mr.intelligence IS NOT NULL
+           AND mr.coding IS NOT NULL
+       )
      ORDER BY completed_at DESC, id DESC
      LIMIT 1`,
   ).first<FetchRun>();
@@ -374,7 +381,11 @@ export async function getTimelineForModel(
         fr.completed_at AS timeline_completed_at
      FROM model_results mr
      JOIN fetch_runs fr ON fr.id = mr.run_id
-     WHERE mr.model_key = ? AND fr.status = 'success'
+     WHERE mr.model_key = ?
+       AND fr.status = 'success'
+       AND mr.total_cost > 0
+       AND mr.intelligence IS NOT NULL
+       AND mr.coding IS NOT NULL
      ORDER BY fr.completed_at ASC, fr.id ASC
      LIMIT ?`,
   )
@@ -390,10 +401,17 @@ export async function getResultsForSuccessfulRuns(
 ): Promise<TimelineResult[]> {
   const { results = [] } = await env.DB.prepare(
     `WITH recent_runs AS (
-        SELECT id
-        FROM fetch_runs
-        WHERE status = 'success'
-        ORDER BY completed_at DESC, id DESC
+        SELECT fr.id
+        FROM fetch_runs fr
+        WHERE fr.status = 'success'
+          AND EXISTS (
+            SELECT 1 FROM model_results mr
+            WHERE mr.run_id = fr.id
+              AND mr.total_cost > 0
+              AND mr.intelligence IS NOT NULL
+              AND mr.coding IS NOT NULL
+          )
+        ORDER BY fr.completed_at DESC, fr.id DESC
         LIMIT ?
       )
       SELECT
@@ -422,6 +440,9 @@ export async function getModelSummaries(env: Bindings): Promise<ModelSummary[]> 
      FROM model_results mr
      JOIN fetch_runs fr ON fr.id = mr.run_id
      WHERE fr.status = 'success'
+       AND mr.total_cost > 0
+       AND mr.intelligence IS NOT NULL
+       AND mr.coding IS NOT NULL
      GROUP BY mr.model_key
      ORDER BY LOWER(mr.name) ASC`,
   ).all<ModelSummary>();
