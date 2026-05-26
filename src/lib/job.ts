@@ -5,6 +5,7 @@ import {
   failFetchRun,
   getActiveRun,
   markStaleRunningRuns,
+  pruneStoredRunData,
   storeModelResults,
   storeRawHtmlChunks,
   updateFetchRunProgress,
@@ -27,6 +28,7 @@ const RAW_HTML_WRITE_TIMEOUT_MS = 20_000;
 const MODEL_WRITE_TIMEOUT_MS = 30_000;
 const FINAL_UPDATE_TIMEOUT_MS = 10_000;
 const FAILURE_UPDATE_TIMEOUT_MS = 5_000;
+const PRUNE_TIMEOUT_MS = 30_000;
 
 export async function runFetchJob(
   env: Bindings,
@@ -39,6 +41,22 @@ export async function runFetchJob(
   );
   if (staleRuns > 0) {
     console.warn(`Marked ${staleRuns} stale running fetch run(s) as error`);
+  }
+
+  const pruned = await withTimeout(
+    pruneStoredRunData(env),
+    "prune old stored run data",
+    PRUNE_TIMEOUT_MS,
+  );
+  const prunedItems =
+    pruned.deletedRuns +
+    pruned.deletedRawChunks +
+    pruned.prunedRunMetadata +
+    pruned.prunedRawResultJson;
+  if (prunedItems > 0) {
+    console.log(
+      `Pruned stored run data: ${pruned.deletedRuns} run(s), ${pruned.deletedRawChunks} raw chunk(s), ${pruned.prunedRawResultJson} raw model payload(s)`,
+    );
   }
 
   if (!options.force) {

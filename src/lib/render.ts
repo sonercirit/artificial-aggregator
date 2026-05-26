@@ -141,7 +141,7 @@ export function renderRuns(runs: FetchRun[], context: RenderContext = {}): strin
         <td class="num">${run.result_count}</td>
         <td class="num">${formatBytes(run.html_bytes)}</td>
         <td>${run.html_sha256 ? `<code title="${escapeHtml(run.html_sha256)}">${escapeHtml(run.html_sha256.slice(0, 12))}</code>` : "-"}</td>
-        <td>${run.status === "success" ? link(`/runs/${run.id}/raw`, "raw HTML") : escapeHtml(run.error ?? "")}</td>
+        <td>${run.status === "success" ? (hasRawHtml(run) ? link(`/runs/${run.id}/raw`, "raw HTML") : "raw pruned") : escapeHtml(run.error ?? "")}</td>
       </tr>`,
     )
     .join("");
@@ -175,7 +175,7 @@ export function renderRunDetail(
     `<section class="hero">
       <h1>Run #${run.id}</h1>
       <p class="muted">${escapeHtml(run.status)} · fetched ${formatDateTime(run.completed_at ?? run.started_at)} · ${formatBytes(run.html_bytes)} raw HTML · ${run.result_count} models</p>
-      <p>${link(`/?${params.toString()}`, "Open this run in comparison view")} · ${link(`/runs/${run.id}/raw`, "Download raw HTML")} · ${link(`/api/runs/${run.id}/results`, "JSON results")}</p>
+      <p>${link(`/?${params.toString()}`, "Open this run in comparison view")} · ${hasRawHtml(run) ? `${link(`/runs/${run.id}/raw`, "Download raw HTML")} · ` : ""}${link(`/api/runs/${run.id}/results`, "JSON results")}</p>
       ${run.error ? `<p class="notice danger">${escapeHtml(run.error)}</p>` : ""}
     </section>
     ${topQualityModel ? `<p class="muted">Top quality: <strong>${escapeHtml(topQualityModel.name)}</strong> (${fmt(topQualityModel.quality, 1)} pts)</p>` : ""}
@@ -845,6 +845,10 @@ function formatBytes(value: number | null | undefined): string {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${value} B`;
+}
+
+function hasRawHtml(run: FetchRun): boolean {
+  return run.raw_html_encoding !== "pruned";
 }
 
 function formatDateTime(value: string | null | undefined): string {

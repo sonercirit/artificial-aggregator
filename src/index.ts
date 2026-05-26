@@ -7,10 +7,11 @@ import {
   getModelSummaries,
   getRawHtmlBase64Chunks,
   getResultsForRun,
-  getResultsForSuccessfulRuns,
   getRun,
   getRuns,
+  getSuccessfulTimelineRuns,
   getTimelineForModel,
+  getTimelineResultsForRuns,
 } from "./lib/db";
 import { runFetchJob } from "./lib/job";
 import type { RenderContext } from "./lib/render";
@@ -29,6 +30,7 @@ import type { Bindings } from "./types";
 const app = new Hono<{ Bindings: Bindings }>();
 const THEME_COOKIE = "aa-theme";
 const THEME_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const WINNER_RUN_CHUNK_SIZE = 50;
 
 app.use("*", async (c, next) => {
   const url = new URL(c.req.url);
@@ -81,12 +83,11 @@ app.get("/", async (c) => {
     );
   }
 
-  const [results, historicResults] = await Promise.all([
+  const [results, winnerTimeline] = await Promise.all([
     getResultsForRun(c.env, run.id),
-    getResultsForSuccessfulRuns(c.env, 500),
+    buildWinnerTimelineForRecentRuns(c.env, options, 500),
   ]);
   const scored = scoreRows(results, options);
-  const winnerTimeline = buildWinnerTimeline(historicResults, options);
 
   return c.html(
     renderHome(
@@ -142,6 +143,9 @@ app.get("/runs/:id/raw", async (c) => {
 
   const run = await getRun(c.env, runId);
   if (!run) return c.text("Run not found", 404);
+  if (run.raw_html_encoding === "pruned") {
+    return c.text("Raw HTML was pruned for this run", 410);
+  }
 
   const chunks = await getRawHtmlBase64Chunks(c.env, runId);
   if (chunks.length === 0) return c.text("Raw HTML not found for this run", 404);
@@ -206,8 +210,7 @@ app.get("/api/winners", async (c) => {
   const url = new URL(c.req.url);
   const options = parseScoreOptions(url.searchParams);
   const runLimit = positiveInt(url.searchParams.get("runs")) ?? 500;
-  const historicResults = await getResultsForSuccessfulRuns(c.env, Math.min(runLimit, 2000));
-  const winners = buildWinnerTimeline(historicResults, options);
+  const winners = await buildWinnerTimelineForRecentRuns(c.env, options, Math.min(runLimit, 2000));
 
   return c.json({ options, winners });
 });
@@ -267,6 +270,23 @@ export default {
   },
 };
 
+async function buildWinnerTimelineForRecentRuns(
+  env: Bindings,
+  options: ScoreOptions,
+  runLimit: number,
+): Promise<Array<ScoredRow<TimelineResult>>> {
+  const runs = await getSuccessfulTimelineRuns(env, runLimit);
+  const winners: Array<ScoredRow<TimelineResult>> = [];
+
+  for (let i = 0; i < runs.length; i += WINNER_RUN_CHUNK_SIZE) {
+    const runIds = runs.slice(i, i + WINNER_RUN_CHUNK_SIZE).map((run) => run.id);
+    const results = await getTimelineResultsForRuns(env, runIds);
+    winners.push(...buildWinnerTimeline(results, options));
+  }
+
+  return winners.sort(compareTimelineRows);
+}
+
 function buildWinnerTimeline(
   results: TimelineResult[],
   options: ScoreOptions,
@@ -289,10 +309,12 @@ function buildWinnerTimeline(
     if (winner) winners.push(winner);
   }
 
-  return winners.sort((a, b) =>
-    String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
-      String(b.runCompletedAt ?? b.runStartedAt),
-    ),
+  return winners.sort(compareTimelineRows);
+}
+
+function compareTimelineRows(a: TimelineResult, b: TimelineResult): number {
+  return String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
+    String(b.runCompletedAt ?? b.runStartedAt),
   );
 }
 

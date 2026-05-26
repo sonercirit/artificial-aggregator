@@ -65,6 +65,12 @@ export type ModelSummary = {
   latest_at: string | null;
 };
 
+export type TimelineRun = {
+  id: number;
+  started_at: string;
+  completed_at: string | null;
+};
+
 export type CompleteRunInput = {
   durationMs: number;
   httpStatus: number | null;
@@ -82,6 +88,19 @@ export type RunProgressInput = {
   htmlGzipBytes?: number | null;
   modelCount?: number | null;
   resultCount?: number | null;
+};
+
+export type PruneStoredRunDataInput = {
+  keepRuns?: number;
+  keepRawRuns?: number;
+  keepRawResultRuns?: number;
+};
+
+export type PruneStoredRunDataResult = {
+  deletedRuns: number;
+  deletedRawChunks: number;
+  prunedRunMetadata: number;
+  prunedRawResultJson: number;
 };
 
 export async function markStaleRunningRuns(
@@ -230,6 +249,70 @@ export async function failFetchRun(
       runId,
     )
     .run();
+}
+
+export async function pruneStoredRunData(
+  env: Bindings,
+  input: PruneStoredRunDataInput = {},
+): Promise<PruneStoredRunDataResult> {
+  const keepRuns = positiveLimit(input.keepRuns, 1500);
+  const keepRawRuns = Math.min(positiveLimit(input.keepRawRuns, 72), keepRuns);
+  const keepRawResultRuns = Math.min(positiveLimit(input.keepRawResultRuns, 500), keepRuns);
+
+  const deletedRawChunks = await env.DB.prepare(
+    `DELETE FROM raw_html_chunks
+     WHERE run_id NOT IN (
+       SELECT id FROM fetch_runs
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?
+     )`,
+  )
+    .bind(keepRawRuns)
+    .run();
+
+  const prunedRunMetadata = await env.DB.prepare(
+    `UPDATE fetch_runs
+     SET raw_html_encoding = 'pruned'
+     WHERE raw_html_encoding <> 'pruned'
+       AND id NOT IN (
+         SELECT id FROM fetch_runs
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?
+       )`,
+  )
+    .bind(keepRawRuns)
+    .run();
+
+  const prunedRawResultJson = await env.DB.prepare(
+    `UPDATE model_results
+     SET raw_result_json = '{}'
+     WHERE raw_result_json <> '{}'
+       AND run_id NOT IN (
+         SELECT id FROM fetch_runs
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?
+       )`,
+  )
+    .bind(keepRawResultRuns)
+    .run();
+
+  const deletedRuns = await env.DB.prepare(
+    `DELETE FROM fetch_runs
+     WHERE id NOT IN (
+       SELECT id FROM fetch_runs
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?
+     )`,
+  )
+    .bind(keepRuns)
+    .run();
+
+  return {
+    deletedRuns: dbChanges(deletedRuns),
+    deletedRawChunks: dbChanges(deletedRawChunks),
+    prunedRunMetadata: dbChanges(prunedRunMetadata),
+    prunedRawResultJson: dbChanges(prunedRawResultJson),
+  };
 }
 
 export async function storeRawHtmlChunks(
@@ -395,39 +478,81 @@ export async function getTimelineForModel(
   return results.map(rowToTimelineResult);
 }
 
+export async function getSuccessfulTimelineRuns(
+  env: Bindings,
+  limit = 500,
+): Promise<TimelineRun[]> {
+  const { results = [] } = await env.DB.prepare(
+    `SELECT fr.id, fr.started_at, fr.completed_at
+     FROM fetch_runs fr
+     WHERE fr.status = 'success'
+       AND EXISTS (
+         SELECT 1 FROM model_results mr
+         WHERE mr.run_id = fr.id
+           AND mr.total_cost > 0
+           AND mr.intelligence IS NOT NULL
+           AND mr.coding IS NOT NULL
+       )
+     ORDER BY fr.completed_at DESC, fr.id DESC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<TimelineRun>();
+
+  return results;
+}
+
+export async function getTimelineResultsForRuns(
+  env: Bindings,
+  runIds: number[],
+): Promise<TimelineResult[]> {
+  const ids = [...new Set(runIds)].filter((id) => Number.isInteger(id) && id > 0);
+  if (ids.length === 0) return [];
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const { results = [] } = await env.DB.prepare(
+    `SELECT
+        mr.run_id,
+        mr.model_key,
+        mr.name,
+        mr.creator_name,
+        mr.release_date,
+        mr.total_cost,
+        mr.intelligence,
+        mr.coding,
+        mr.agentic,
+        mr.mmmu,
+        fr.id AS timeline_run_id,
+        fr.started_at AS timeline_started_at,
+        fr.completed_at AS timeline_completed_at
+     FROM model_results mr
+     JOIN fetch_runs fr ON fr.id = mr.run_id
+     WHERE mr.run_id IN (${placeholders})
+       AND fr.status = 'success'
+       AND mr.total_cost > 0
+       AND mr.intelligence IS NOT NULL
+       AND mr.coding IS NOT NULL
+     ORDER BY fr.completed_at ASC, fr.id ASC, LOWER(mr.name) ASC`,
+  )
+    .bind(...ids)
+    .all<ScoreModelResultRow & TimelineColumns>();
+
+  return results.map(rowToScoreTimelineResult);
+}
+
 export async function getResultsForSuccessfulRuns(
   env: Bindings,
   runLimit = 500,
 ): Promise<TimelineResult[]> {
-  const { results = [] } = await env.DB.prepare(
-    `WITH recent_runs AS (
-        SELECT fr.id
-        FROM fetch_runs fr
-        WHERE fr.status = 'success'
-          AND EXISTS (
-            SELECT 1 FROM model_results mr
-            WHERE mr.run_id = fr.id
-              AND mr.total_cost > 0
-              AND mr.intelligence IS NOT NULL
-              AND mr.coding IS NOT NULL
-          )
-        ORDER BY fr.completed_at DESC, fr.id DESC
-        LIMIT ?
-      )
-      SELECT
-        mr.*,
-        fr.id AS timeline_run_id,
-        fr.started_at AS timeline_started_at,
-        fr.completed_at AS timeline_completed_at
-      FROM fetch_runs fr
-      JOIN recent_runs rr ON rr.id = fr.id
-      JOIN model_results mr ON mr.run_id = fr.id
-      ORDER BY fr.completed_at ASC, fr.id ASC, LOWER(mr.name) ASC`,
-  )
-    .bind(runLimit)
-    .all<ModelResultRow & TimelineColumns>();
+  const runs = await getSuccessfulTimelineRuns(env, runLimit);
+  const allResults: TimelineResult[] = [];
 
-  return results.map(rowToTimelineResult);
+  for (let i = 0; i < runs.length; i += 50) {
+    const runIds = runs.slice(i, i + 50).map((run) => run.id);
+    allResults.push(...(await getTimelineResultsForRuns(env, runIds)));
+  }
+
+  return allResults.sort(compareTimelineResults);
 }
 
 export async function getModelSummaries(env: Bindings): Promise<ModelSummary[]> {
@@ -468,6 +593,19 @@ type TimelineColumns = {
   timeline_completed_at: string | null;
 };
 
+type ScoreModelResultRow = {
+  run_id: number;
+  model_key: string;
+  name: string;
+  creator_name: string | null;
+  release_date: string | null;
+  total_cost: number | null;
+  intelligence: number | null;
+  coding: number | null;
+  agentic: number | null;
+  mmmu: number | null;
+};
+
 function rowToTimelineResult(row: ModelResultRow & TimelineColumns): TimelineResult {
   return {
     ...rowToModelResult(row),
@@ -475,6 +613,44 @@ function rowToTimelineResult(row: ModelResultRow & TimelineColumns): TimelineRes
     runStartedAt: row.timeline_started_at,
     runCompletedAt: row.timeline_completed_at,
   };
+}
+
+function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): TimelineResult {
+  return {
+    modelKey: row.model_key,
+    sourceId: null,
+    slug: null,
+    name: row.name,
+    shortName: null,
+    creatorName: row.creator_name,
+    creatorSlug: null,
+    releaseDate: row.release_date,
+    cutoffDate: null,
+    totalCost: row.total_cost,
+    inputCost: null,
+    outputCost: null,
+    reasoningCost: null,
+    answerCost: null,
+    intelligence: row.intelligence,
+    coding: row.coding,
+    agentic: row.agentic,
+    mmmu: row.mmmu,
+    priceInput1m: null,
+    priceOutput1m: null,
+    activeParams: null,
+    isOpenWeights: null,
+    isReasoning: null,
+    rawResultJson: "",
+    runId: row.timeline_run_id,
+    runStartedAt: row.timeline_started_at,
+    runCompletedAt: row.timeline_completed_at,
+  };
+}
+
+function compareTimelineResults(a: TimelineResult, b: TimelineResult): number {
+  return String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
+    String(b.runCompletedAt ?? b.runStartedAt),
+  );
 }
 
 function rowToModelResult(row: ModelResultRow): ParsedModelResult {
@@ -522,4 +698,13 @@ function boolToInt(value: boolean | null): number | null {
 
 function intToBool(value: number | null): boolean | null {
   return value == null ? null : Boolean(value);
+}
+
+function dbChanges(result: D1Result): number {
+  return Number(result.meta.changes ?? 0);
+}
+
+function positiveLimit(value: number | undefined, fallback: number): number {
+  if (value == null || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.floor(value));
 }
