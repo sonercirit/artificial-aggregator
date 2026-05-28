@@ -79,6 +79,7 @@ export type CompleteRunInput = {
   htmlGzipBytes: number | null;
   modelCount: number;
   resultCount: number;
+  completedAt?: string;
 };
 
 export type RunProgressInput = {
@@ -139,13 +140,24 @@ export async function getActiveRun(env: Bindings): Promise<FetchRun | null> {
     .first<FetchRun>();
 }
 
-export async function createFetchRun(env: Bindings, sourceUrl: string): Promise<number> {
-  const result = await env.DB.prepare(
-    `INSERT INTO fetch_runs (source_url, status, parser_version)
-     VALUES (?, 'running', ?)`,
-  )
-    .bind(sourceUrl, PARSER_VERSION)
-    .run();
+export async function createFetchRun(
+  env: Bindings,
+  sourceUrl: string,
+  startedAt?: string,
+): Promise<number> {
+  const result = startedAt
+    ? await env.DB.prepare(
+        `INSERT INTO fetch_runs (source_url, status, parser_version, started_at)
+         VALUES (?, 'running', ?, ?)`,
+      )
+        .bind(sourceUrl, PARSER_VERSION, startedAt)
+        .run()
+    : await env.DB.prepare(
+        `INSERT INTO fetch_runs (source_url, status, parser_version)
+         VALUES (?, 'running', ?)`,
+      )
+        .bind(sourceUrl, PARSER_VERSION)
+        .run();
 
   const id = Number(result.meta.last_row_id);
   if (!Number.isFinite(id) || id <= 0) {
@@ -201,7 +213,7 @@ export async function completeFetchRun(
      WHERE id = ?`,
   )
     .bind(
-      new Date().toISOString(),
+      input.completedAt ?? new Date().toISOString(),
       input.durationMs,
       input.httpStatus,
       input.htmlBytes,
@@ -476,6 +488,36 @@ export async function getTimelineForModel(
     .all<ModelResultRow & TimelineColumns>();
 
   return results.map(rowToTimelineResult);
+}
+
+export async function getRepairableRawRuns(
+  env: Bindings,
+  limit = 2,
+  olderThanMs = 20 * 60 * 1000,
+): Promise<FetchRun[]> {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const { results = [] } = await env.DB.prepare(
+    `SELECT fr.*
+     FROM fetch_runs fr
+     WHERE fr.status IN ('running', 'error')
+       AND (fr.status = 'error' OR fr.started_at < ?)
+       AND fr.http_status BETWEEN 200 AND 299
+       AND fr.raw_html_encoding <> 'pruned'
+       AND EXISTS (
+         SELECT 1 FROM raw_html_chunks rhc
+         WHERE rhc.run_id = fr.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM model_results mr
+         WHERE mr.run_id = fr.id
+       )
+     ORDER BY fr.started_at DESC, fr.id DESC
+     LIMIT ?`,
+  )
+    .bind(cutoff, limit)
+    .all<FetchRun>();
+
+  return results;
 }
 
 export async function getSuccessfulTimelineRuns(
