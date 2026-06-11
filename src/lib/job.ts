@@ -1,3 +1,12 @@
+/**
+ * The hourly fetch job: snapshot the Artificial Analysis models page, store
+ * the raw HTML and normalized results, and keep the run history healthy.
+ *
+ * Every step is individually time-boxed so a hung fetch or D1 call cannot
+ * silently eat the Worker's wall-clock budget — a timed-out step fails the
+ * run with a recorded error instead.
+ */
+
 import { ARTIFICIAL_ANALYSIS_URL, parseHtmlToResults } from "./aa";
 import type { FetchRun } from "./db";
 import {
@@ -37,47 +46,14 @@ const FINAL_UPDATE_TIMEOUT_MS = 10_000;
 const FAILURE_UPDATE_TIMEOUT_MS = 5_000;
 const PRUNE_TIMEOUT_MS = 30_000;
 
+/** A run is considered abandoned (stale, repairable) after this long. */
+const STALE_RUN_MS = 20 * 60 * 1000;
+
 export async function runFetchJob(
   env: Bindings,
   options: { force?: boolean } = {},
 ): Promise<FetchJobResult> {
-  const staleRuns = await withTimeout(
-    markStaleRunningRuns(env),
-    "mark stale running runs",
-    FINAL_UPDATE_TIMEOUT_MS,
-  );
-  if (staleRuns > 0) {
-    console.warn(`Marked ${staleRuns} stale running fetch run(s) as error`);
-  }
-
-  try {
-    const repairedRuns = await withTimeout(
-      repairRawOnlyRuns(env),
-      "repair raw-only fetch runs",
-      REPAIR_TIMEOUT_MS,
-    );
-    if (repairedRuns > 0) {
-      console.log(`Repaired ${repairedRuns} raw-only fetch run(s)`);
-    }
-  } catch (error) {
-    console.warn("Could not repair raw-only fetch runs", error);
-  }
-
-  const pruned = await withTimeout(
-    pruneStoredRunData(env),
-    "prune old stored run data",
-    PRUNE_TIMEOUT_MS,
-  );
-  const prunedItems =
-    pruned.deletedRuns +
-    pruned.deletedRawChunks +
-    pruned.prunedRunMetadata +
-    pruned.prunedRawResultJson;
-  if (prunedItems > 0) {
-    console.log(
-      `Pruned stored run data: ${pruned.deletedRuns} run(s), ${pruned.deletedRawChunks} raw chunk(s), ${pruned.prunedRawResultJson} raw model payload(s)`,
-    );
-  }
+  await runMaintenance(env);
 
   if (!options.force) {
     const activeRun = await getActiveRun(env);
@@ -95,6 +71,8 @@ export async function runFetchJob(
   const sourceUrl = env.AA_SOURCE_URL || ARTIFICIAL_ANALYSIS_URL;
   console.log(`Fetch job started for ${sourceUrl}`);
 
+  // Failure-path bookkeeping: whatever was captured before the error is
+  // persisted so the run stays auditable and repairable.
   let runId: number | null = null;
   let httpStatus: number | null = null;
   let htmlBytes: number | null = null;
@@ -219,15 +197,55 @@ export async function runFetchJob(
   }
 }
 
-type FailureArtifacts = {
-  httpStatus: number | null;
-  htmlBytes: number | null;
-  htmlSha256: string | null;
-  htmlGzipBytes: number | null;
-  compressedChunks: string[] | null;
-  rawHtmlStored: boolean;
-};
+/** Pre-flight housekeeping: flag stale runs, repair raw-only runs, prune storage. */
+async function runMaintenance(env: Bindings): Promise<void> {
+  const staleRuns = await withTimeout(
+    markStaleRunningRuns(env),
+    "mark stale running runs",
+    FINAL_UPDATE_TIMEOUT_MS,
+  );
+  if (staleRuns > 0) {
+    console.warn(`Marked ${staleRuns} stale running fetch run(s) as error`);
+  }
 
+  try {
+    const repairedRuns = await withTimeout(
+      repairRawOnlyRuns(env),
+      "repair raw-only fetch runs",
+      REPAIR_TIMEOUT_MS,
+    );
+    if (repairedRuns > 0) {
+      console.log(`Repaired ${repairedRuns} raw-only fetch run(s)`);
+    }
+  } catch (error) {
+    console.warn("Could not repair raw-only fetch runs", error);
+  }
+
+  const pruned = await withTimeout(
+    pruneStoredRunData(env),
+    "prune old stored run data",
+    PRUNE_TIMEOUT_MS,
+  );
+  const prunedItems =
+    pruned.deletedRuns +
+    pruned.deletedRawChunks +
+    pruned.prunedRunMetadata +
+    pruned.prunedRawResultJson;
+  if (prunedItems > 0) {
+    console.log(
+      `Pruned stored run data: ${pruned.deletedRuns} run(s), ${pruned.deletedRawChunks} raw chunk(s), ${pruned.prunedRawResultJson} raw model payload(s)`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Repairing raw-only runs
+// ---------------------------------------------------------------------------
+
+/**
+ * A "raw-only" run stored its HTML snapshot but died before writing model
+ * rows. Re-parse the stored snapshot and complete the run retroactively.
+ */
 async function repairRawOnlyRuns(env: Bindings): Promise<number> {
   const runs = await getRepairableRawRuns(env, REPAIR_RAW_RUN_LIMIT);
   let repaired = 0;
@@ -290,8 +308,10 @@ async function repairRawOnlyRuns(env: Bindings): Promise<number> {
   return repaired;
 }
 
+// A stale run's recorded completion/duration reflect when it was flagged,
+// not when it actually ran; fall back to its start time in that case.
 function repairedCompletedAt(run: FetchRun): string {
-  if (run.completed_at && run.duration_ms != null && run.duration_ms < 20 * 60 * 1000) {
+  if (run.completed_at && run.duration_ms != null && run.duration_ms < STALE_RUN_MS) {
     return run.completed_at;
   }
 
@@ -299,7 +319,7 @@ function repairedCompletedAt(run: FetchRun): string {
 }
 
 function repairedDurationMs(run: FetchRun): number {
-  if (run.duration_ms != null && run.duration_ms < 20 * 60 * 1000) return run.duration_ms;
+  if (run.duration_ms != null && run.duration_ms < STALE_RUN_MS) return run.duration_ms;
 
   const completedAt = Date.parse(repairedCompletedAt(run));
   const startedAt = Date.parse(run.started_at);
@@ -309,6 +329,10 @@ function repairedDurationMs(run: FetchRun): number {
 
   return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Fetching
+// ---------------------------------------------------------------------------
 
 async function fetchSourceHtml(sourceUrl: string): Promise<{ response: Response; html: string }> {
   let lastError: unknown;
@@ -363,6 +387,19 @@ async function fetchSourceHtmlAttempt(
   return { response, html };
 }
 
+// ---------------------------------------------------------------------------
+// Failure handling
+// ---------------------------------------------------------------------------
+
+type FailureArtifacts = {
+  httpStatus: number | null;
+  htmlBytes: number | null;
+  htmlSha256: string | null;
+  htmlGzipBytes: number | null;
+  compressedChunks: string[] | null;
+  rawHtmlStored: boolean;
+};
+
 async function recordFailureArtifacts(
   env: Bindings,
   runId: number,
@@ -394,6 +431,10 @@ async function recordFailureArtifacts(
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 async function withTimeout<T>(
   promise: Promise<T>,

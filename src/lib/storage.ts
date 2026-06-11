@@ -1,3 +1,8 @@
+/**
+ * Hashing and the gzip/base64 chunk codec used to fit multi-megabyte raw
+ * HTML snapshots into D1 text rows.
+ */
+
 const textEncoder = new TextEncoder();
 
 export async function sha256Hex(value: string): Promise<string> {

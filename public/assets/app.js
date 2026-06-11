@@ -1,33 +1,31 @@
+/**
+ * Progressive enhancement: instant theme switching (persisted to
+ * localStorage, mirrored to the cookie the server reads) and floating
+ * tooltips for elements carrying a data-tip attribute.
+ *
+ * Every page works without this script; it only upgrades the experience.
+ */
 (() => {
   const root = document.documentElement;
   const fallbackTheme = "midnight";
   const themeStorageKey = "aa-theme";
   const themeCookieName = "aa-theme";
   const themeCookieMaxAge = 60 * 60 * 24 * 365;
-  const knownThemes = [
-    "dark",
-    "light",
-    "slate",
-    "midnight",
-    "nord",
-    "dracula",
-    "synthwave",
-    "cyberpunk",
-    "forest",
-    "emerald",
-    "ocean",
-    "sky",
-    "rose",
-    "sunset",
-    "amber",
-    "grape",
-    "mono",
-    "coffee",
-    "solarized",
-    "high-contrast",
-  ];
 
   root.classList.add("js-enabled");
+
+  const themeSelect = () => {
+    const select = document.getElementById("theme-select");
+    return select instanceof HTMLSelectElement ? select : null;
+  };
+
+  // The server-rendered picker is the source of truth for which themes
+  // exist; reading it here avoids maintaining a second list. The script is
+  // deferred, so the select is already in the DOM when this runs.
+  const knownThemes = (() => {
+    const select = themeSelect();
+    return select ? Array.from(select.options, (option) => option.value) : [fallbackTheme];
+  })();
 
   const isTheme = (theme) => knownThemes.includes(theme);
   const normalizeTheme = (theme) => (isTheme(theme) ? theme : fallbackTheme);
@@ -55,13 +53,15 @@
     const next = normalizeTheme(theme);
     root.dataset.theme = next;
 
-    const select = document.getElementById("theme-select");
-    if (select instanceof HTMLSelectElement) select.value = next;
+    const select = themeSelect();
+    if (select) select.value = next;
 
     if (persist) persistTheme(next);
     return next;
   };
 
+  // Apply the stored theme immediately (before DOMContentLoaded) to avoid a
+  // flash; re-persisting also keeps the cookie in sync with localStorage.
   const initialTheme = storedTheme() ?? root.dataset.theme ?? fallbackTheme;
   applyTheme(initialTheme, storedTheme() != null);
 
@@ -79,8 +79,8 @@
   });
 
   function initThemePicker() {
-    const select = document.getElementById("theme-select");
-    if (!(select instanceof HTMLSelectElement)) return;
+    const select = themeSelect();
+    if (!select) return;
 
     applyTheme(storedTheme() ?? root.dataset.theme ?? fallbackTheme);
     select.addEventListener("change", () => applyTheme(select.value, true));
@@ -144,6 +144,8 @@
     };
 
     for (const trigger of triggers) {
+      // Kill the native title/<title> fallbacks so they do not double up
+      // with the floating bubble.
       trigger.removeAttribute("title");
       for (const child of Array.from(trigger.children)) {
         if (child.tagName.toLowerCase() === "title") child.remove();

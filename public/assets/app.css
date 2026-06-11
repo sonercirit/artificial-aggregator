@@ -1,3 +1,11 @@
+/* ==========================================================================
+   Design tokens
+   --------------------------------------------------------------------------
+   One block per theme; the [data-theme] attribute is set server-side and
+   switched client-side by app.js. Every theme defines the same variables.
+   Theme values must match the THEMES list in src/lib/render.ts.
+   ========================================================================== */
+
 :root,
 [data-theme="midnight"] {
   color-scheme: dark;
@@ -361,6 +369,11 @@
   --hover: rgba(255, 255, 255, 0.12);
   --code-bg: rgba(255, 255, 255, 0.16);
 }
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
 * {
   box-sizing: border-box;
 }
@@ -382,6 +395,41 @@ a {
 a:hover {
   text-decoration: underline;
 }
+h1 {
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 1;
+  margin: 0 0 12px;
+  letter-spacing: -0.04em;
+}
+h2 {
+  margin: 0 0 12px;
+}
+small {
+  color: var(--muted);
+}
+code {
+  background: var(--code-bg);
+  padding: 2px 5px;
+  border-radius: 6px;
+}
+.muted {
+  color: var(--muted);
+}
+.notice {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 12px;
+}
+.danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fecaca;
+}
+
+/* ==========================================================================
+   Header, navigation, and page scaffolding
+   ========================================================================== */
+
 header {
   position: sticky;
   top: 0;
@@ -403,6 +451,33 @@ nav {
   font-weight: 800;
   color: var(--text);
 }
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px 20px 96px;
+}
+.hero {
+  margin-bottom: 24px;
+}
+.site-footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 10px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--header-bg);
+  backdrop-filter: blur(10px);
+  color: var(--muted);
+  text-align: center;
+  font-size: 0.85rem;
+}
+.site-footer a {
+  font-weight: 700;
+}
+
+/* Theme picker (in the header); app.js hides the submit button when active. */
 .theme-picker {
   margin-left: auto;
   min-width: 170px;
@@ -424,9 +499,6 @@ nav {
 .theme-picker select {
   padding: 7px 9px;
 }
-.theme-picker input[type="hidden"] {
-  display: none;
-}
 .theme-picker .theme-submit {
   width: auto;
   padding: 7px 12px;
@@ -438,52 +510,34 @@ nav {
 .js-enabled .theme-submit {
   display: none;
 }
-main {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 24px 20px 96px;
-}
-.site-footer {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2;
-  padding: 10px 20px;
-  border-top: 1px solid var(--line);
-  background: var(--header-bg);
-  backdrop-filter: blur(10px);
-  color: var(--muted);
-  text-align: center;
-  font-size: 0.85rem;
-}
-.site-footer a {
-  font-weight: 700;
-}
-h1 {
-  font-size: clamp(2rem, 5vw, 4rem);
-  line-height: 1;
-  margin: 0 0 12px;
-  letter-spacing: -0.04em;
-}
-h2 {
-  margin: 0 0 12px;
-}
-.hero {
-  margin-bottom: 24px;
-}
-.muted {
-  color: var(--muted);
-}
-.notice {
-  padding: 12px 14px;
+
+/* ==========================================================================
+   Controls and forms
+   ========================================================================== */
+
+select,
+input,
+button {
+  width: 100%;
   border: 1px solid var(--line);
-  background: var(--panel);
-  border-radius: 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px 10px;
 }
-.danger {
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #fecaca;
+button {
+  cursor: pointer;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+  align-self: end;
+}
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 .controls {
   display: grid;
@@ -540,12 +594,11 @@ h2 {
 .controls-actions button {
   width: min(220px, 100%);
 }
-label {
-  display: grid;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
+
+/* ==========================================================================
+   Tooltips
+   ========================================================================== */
+
 .label-row,
 .heading-row,
 .th-label {
@@ -557,6 +610,7 @@ label {
 .th-label {
   white-space: nowrap;
 }
+/* The inline "?" badge that triggers a tooltip. */
 .tooltip {
   display: inline-flex;
   align-items: center;
@@ -581,6 +635,7 @@ label {
   border-color: var(--accent);
   outline: none;
 }
+/* The floating bubble app.js creates and positions. */
 .floating-tooltip {
   position: fixed;
   z-index: 9999;
@@ -629,24 +684,11 @@ label {
   border-right: 0;
   border-bottom: 0;
 }
-select,
-input,
-button {
-  width: 100%;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--text);
-  border-radius: 10px;
-  padding: 9px 10px;
-}
-button {
-  cursor: pointer;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
-  font-weight: 700;
-  align-self: end;
-}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);
@@ -683,6 +725,29 @@ th.center .th-label {
   justify-content: center;
   width: 100%;
 }
+tr:hover td {
+  background: var(--hover);
+}
+tr.frontier td:first-child {
+  border-left: 3px solid var(--good);
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.center {
+  text-align: center;
+}
+.strong {
+  font-weight: 800;
+}
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 32px;
+}
+
+/* The main comparison table: fixed layout with proportional columns. */
 .score-table {
   min-width: 0;
   table-layout: fixed;
@@ -733,35 +798,8 @@ th.center .th-label {
 .score-table .penalty-col {
   width: 5.5%;
 }
-tr:hover td {
-  background: var(--hover);
-}
-tr.frontier td:first-child {
-  border-left: 3px solid var(--good);
-}
-.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.center {
-  text-align: center;
-}
-.strong {
-  font-weight: 800;
-}
-.empty {
-  text-align: center;
-  color: var(--muted);
-  padding: 32px;
-}
-small {
-  color: var(--muted);
-}
-code {
-  background: var(--code-bg);
-  padding: 2px 5px;
-  border-radius: 6px;
-}
+
+/* Run status pills. */
 .status {
   padding: 3px 8px;
   border-radius: 999px;
@@ -780,6 +818,11 @@ code {
   background: rgba(245, 158, 11, 0.15);
   color: #fde68a;
 }
+
+/* ==========================================================================
+   Winner panel (home page)
+   ========================================================================== */
+
 .winner-panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -812,34 +855,6 @@ code {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.winner-line {
-  stroke: var(--good);
-}
-.winner-dots {
-  fill: var(--good);
-}
-.chart-line-score {
-  stroke: var(--chart-score);
-}
-.chart-dots-score,
-.chart-entry-score {
-  fill: var(--chart-score);
-}
-.chart-line-cost {
-  stroke: var(--chart-cost);
-}
-.chart-dots-cost,
-.chart-entry-cost {
-  fill: var(--chart-cost);
-}
-.winner-label {
-  fill: var(--text);
-  font-size: 11px;
-  paint-order: stroke;
-  stroke: var(--panel);
-  stroke-width: 4px;
-  stroke-linejoin: round;
-}
 .winner-grid {
   display: grid;
   grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.2fr);
@@ -865,6 +880,11 @@ code {
 .compact-table table {
   min-width: 620px;
 }
+
+/* ==========================================================================
+   Charts and SVG
+   ========================================================================== */
+
 .charts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -915,6 +935,39 @@ svg text {
   fill: var(--muted);
   font-size: 12px;
 }
+.winner-line {
+  stroke: var(--good);
+}
+.winner-dots {
+  fill: var(--good);
+}
+.winner-label {
+  fill: var(--text);
+  font-size: 11px;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+.chart-line-score {
+  stroke: var(--chart-score);
+}
+.chart-dots-score,
+.chart-entry-score {
+  fill: var(--chart-score);
+}
+.chart-line-cost {
+  stroke: var(--chart-cost);
+}
+.chart-dots-cost,
+.chart-entry-cost {
+  fill: var(--chart-cost);
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
 @media (max-width: 760px) {
   .theme-picker {
     margin-left: 0;

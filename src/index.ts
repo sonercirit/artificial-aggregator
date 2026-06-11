@@ -1,18 +1,4 @@
 import { Hono } from "hono";
-import type { ScoreOptions, ScoredRow } from "./lib/aa";
-import { parseScoreOptions, scoreRows } from "./lib/aa";
-import type { TimelineResult } from "./lib/db";
-import {
-  getLatestSuccessfulRun,
-  getModelSummaries,
-  getRawHtmlBase64Chunks,
-  getResultsForRun,
-  getRun,
-  getRuns,
-  getSuccessfulTimelineRuns,
-  getTimelineForModel,
-  getTimelineResultsForRuns,
-} from "./lib/db";
 import { runFetchJob } from "./lib/job";
 import type { RenderContext } from "./lib/render";
 import {
@@ -24,13 +10,27 @@ import {
   renderRunDetail,
   renderRuns,
 } from "./lib/render";
+import type { ScoreOptions } from "./lib/scoring";
+import { compareByRunTime, parseScoreOptions, scoreRows } from "./lib/scoring";
 import { gunzipBase64ChunksToString } from "./lib/storage";
+import { getWinnerTimeline } from "./lib/winners";
+import {
+  getLatestSuccessfulRun,
+  getModelSummaries,
+  getRawHtmlBase64Chunks,
+  getResultsForRun,
+  getRun,
+  getRuns,
+  getTimelineForModel,
+} from "./lib/db";
 import type { Bindings } from "./types";
 
-const app = new Hono<{ Bindings: Bindings }>();
 const THEME_COOKIE = "aa-theme";
 const THEME_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
-const WINNER_RUN_CHUNK_SIZE = 50;
+/** Successful runs scored for the home page's winner timeline. */
+const HOME_WINNER_RUNS = 500;
+
+const app = new Hono<{ Bindings: Bindings }>();
 
 app.use("*", async (c, next) => {
   const url = new URL(c.req.url);
@@ -85,7 +85,7 @@ app.get("/", async (c) => {
 
   const [results, winnerTimeline] = await Promise.all([
     getResultsForRun(c.env, run.id),
-    buildWinnerTimelineForRecentRuns(c.env, options, 500),
+    getWinnerTimeline(c.env, options, HOME_WINNER_RUNS),
   ]);
   const scored = scoreRows(results, options);
 
@@ -168,16 +168,14 @@ app.get("/history", async (c) => {
 
 app.get("/models/:modelKey", async (c) => {
   const modelKey = c.req.param("modelKey");
-  const options = { ...parseScoreOptions(new URL(c.req.url).searchParams), frontierOnly: false };
-  const timeline = await getTimelineForModel(c.env, modelKey, 2000);
-  const scored = scoreRows(timeline, { ...options, sort: "score", limit: 2000 }).rows.sort((a, b) =>
-    String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
-      String(b.runCompletedAt ?? b.runStartedAt),
-    ),
-  );
+  const options = parseScoreOptions(new URL(c.req.url).searchParams);
+  const timeline = await getModelTimelineRows(c.env, modelKey, options);
 
   return c.html(
-    renderModelTimeline({ modelKey, timeline: scored, options }, getRenderContext(c.req.raw)),
+    renderModelTimeline(
+      { modelKey, timeline, options: { ...options, frontierOnly: false } },
+      getRenderContext(c.req.raw),
+    ),
   );
 });
 
@@ -210,22 +208,17 @@ app.get("/api/winners", async (c) => {
   const url = new URL(c.req.url);
   const options = parseScoreOptions(url.searchParams);
   const runLimit = positiveInt(url.searchParams.get("runs")) ?? 500;
-  const winners = await buildWinnerTimelineForRecentRuns(c.env, options, Math.min(runLimit, 2000));
+  const winners = await getWinnerTimeline(c.env, options, Math.min(runLimit, 2000));
 
   return c.json({ options, winners });
 });
 
 app.get("/api/models/:modelKey/timeline", async (c) => {
   const modelKey = c.req.param("modelKey");
-  const options = { ...parseScoreOptions(new URL(c.req.url).searchParams), frontierOnly: false };
-  const timeline = await getTimelineForModel(c.env, modelKey, 2000);
-  const scored = scoreRows(timeline, { ...options, sort: "score", limit: 2000 }).rows.sort((a, b) =>
-    String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
-      String(b.runCompletedAt ?? b.runStartedAt),
-    ),
-  );
+  const options = parseScoreOptions(new URL(c.req.url).searchParams);
+  const timeline = await getModelTimelineRows(c.env, modelKey, options);
 
-  return c.json({ modelKey, options, timeline: scored });
+  return c.json({ modelKey, options: { ...options, frontierOnly: false }, timeline });
 });
 
 app.post("/admin/fetch", async (c) => {
@@ -270,52 +263,15 @@ export default {
   },
 };
 
-async function buildWinnerTimelineForRecentRuns(
-  env: Bindings,
-  options: ScoreOptions,
-  runLimit: number,
-): Promise<Array<ScoredRow<TimelineResult>>> {
-  const runs = await getSuccessfulTimelineRuns(env, runLimit);
-  const winners: Array<ScoredRow<TimelineResult>> = [];
-
-  for (let i = 0; i < runs.length; i += WINNER_RUN_CHUNK_SIZE) {
-    const runIds = runs.slice(i, i + WINNER_RUN_CHUNK_SIZE).map((run) => run.id);
-    const results = await getTimelineResultsForRuns(env, runIds);
-    winners.push(...buildWinnerTimeline(results, options));
-  }
-
-  return winners.sort(compareTimelineRows);
-}
-
-function buildWinnerTimeline(
-  results: TimelineResult[],
-  options: ScoreOptions,
-): Array<ScoredRow<TimelineResult>> {
-  const runs = new Map<number, TimelineResult[]>();
-
-  for (const result of results) {
-    const bucket = runs.get(result.runId);
-    if (bucket) {
-      bucket.push(result);
-    } else {
-      runs.set(result.runId, [result]);
-    }
-  }
-
-  const winners: Array<ScoredRow<TimelineResult>> = [];
-  for (const runResults of runs.values()) {
-    const scored = scoreRows(runResults, options);
-    const winner = scored.rows[0];
-    if (winner) winners.push(winner);
-  }
-
-  return winners.sort(compareTimelineRows);
-}
-
-function compareTimelineRows(a: TimelineResult, b: TimelineResult): number {
-  return String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
-    String(b.runCompletedAt ?? b.runStartedAt),
-  );
+/** Full scored history for one model, ordered chronologically. */
+async function getModelTimelineRows(env: Bindings, modelKey: string, options: ScoreOptions) {
+  const timeline = await getTimelineForModel(env, modelKey, 2000);
+  return scoreRows(timeline, {
+    ...options,
+    frontierOnly: false,
+    sort: "score",
+    limit: 2000,
+  }).rows.sort(compareByRunTime);
 }
 
 function getRenderContext(request: Request): RenderContext {
@@ -347,6 +303,7 @@ function themeCookie(theme: string): string {
   return `${THEME_COOKIE}=${encodeURIComponent(theme)}; Path=/; Max-Age=${THEME_COOKIE_MAX_AGE}; SameSite=Lax`;
 }
 
+/** Only same-origin paths are allowed as post-theme-change redirect targets. */
 function safeReturnTo(value: string | null): string {
   if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
 

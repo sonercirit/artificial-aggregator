@@ -1,48 +1,15 @@
+/**
+ * Artificial Analysis snapshot parser.
+ *
+ * The source page is a Next.js RSC payload: the model list is embedded in the
+ * HTML as an escaped JSON array. This module locates that array, decodes it,
+ * and normalizes each entry into a stable, storage-ready shape.
+ */
+
 export const ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/models";
+
+/** Stored with every run; bump when the extraction/normalization rules change. */
 export const PARSER_VERSION = "aa-next-rsc-default-data-v2";
-
-export const MODES = ["combined", "coding", "intelligence", "agentic", "mmmu"] as const;
-export type Mode = (typeof MODES)[number];
-
-export const CALCS = ["raw", "sub", "div"] as const;
-export type Calc = (typeof CALCS)[number];
-
-export const SORT_KEYS = [
-  "score",
-  "quality",
-  "value",
-  "cqp",
-  "cost",
-  "intel",
-  "coding",
-  "agentic",
-  "mmmu",
-  "released",
-  "name",
-] as const;
-export type SortKey = (typeof SORT_KEYS)[number];
-
-export type ScoreOptions = {
-  mode: Mode;
-  calc: Calc;
-  costWeight: number;
-  costFloor: number;
-  costPower: number;
-  sort: SortKey;
-  frontierOnly: boolean;
-  limit: number;
-};
-
-export const DEFAULT_SCORE_OPTIONS: ScoreOptions = {
-  mode: "combined",
-  calc: "raw",
-  costWeight: 10,
-  costFloor: 1,
-  costPower: 1,
-  sort: "score",
-  frontierOnly: false,
-  limit: 100,
-};
 
 export type ParsedModelResult = {
   modelKey: string;
@@ -71,38 +38,38 @@ export type ParsedModelResult = {
   rawResultJson: string;
 };
 
-export type ScoredRow<T extends ParsedModelResult = ParsedModelResult> = T & {
-  quality: number;
-  costPenalty: number;
-  pointsPerK: number;
-  costPerQuality: number;
-  deltaTop: number;
-  costVsTop: number;
-  calculated: number;
-  frontier: boolean;
-};
-
-export type ScoreResult<T extends ParsedModelResult = ParsedModelResult> = {
-  rows: ScoredRow<T>[];
-  topQualityModel: ScoredRow<T> | null;
-  effectiveSortBy: SortKey;
-};
+/**
+ * A result that can participate in score/cost ranking. The same predicate is
+ * mirrored in SQL by db.ts (total_cost > 0, intelligence and coding present).
+ */
+export function isScoreable(result: ParsedModelResult): boolean {
+  return (
+    isNumber(result.totalCost) &&
+    result.totalCost > 0 &&
+    isNumber(result.intelligence) &&
+    isNumber(result.coding)
+  );
+}
 
 export function parseHtmlToResults(html: string): ParsedModelResult[] {
   const results = extractModelsFromHtml(html)
     .map(normalizeModel)
-    .filter((model) => {
-      return model.modelKey.length > 0 && model.name.length > 0;
-    });
+    .filter((model) => model.modelKey.length > 0 && model.name.length > 0);
 
-  if (results.length > 0 && !results.some(isScoreableResult)) {
+  if (results.length > 0 && !results.some(isScoreable)) {
     throw new Error("Parsed Artificial Analysis payload did not include score/cost fields");
   }
 
   return results;
 }
 
-export function extractModelsFromHtml(html: string): unknown[] {
+// ---------------------------------------------------------------------------
+// Payload extraction
+// ---------------------------------------------------------------------------
+
+function extractModelsFromHtml(html: string): unknown[] {
+  // Prefer "defaultData" when it actually carries scores; older payloads used
+  // a "models" array instead.
   const defaultData = extractArrayFromHtmlPayload(html, "defaultData");
   if (defaultData && defaultData.some(hasModelScoreFields)) return defaultData;
 
@@ -111,153 +78,6 @@ export function extractModelsFromHtml(html: string): unknown[] {
   if (defaultData) return defaultData;
 
   throw new Error("Could not find Artificial Analysis models payload in HTML");
-}
-
-export function parseScoreOptions(params: URLSearchParams): ScoreOptions {
-  const mode = enumParam(params, "mode", MODES, DEFAULT_SCORE_OPTIONS.mode);
-  const calc = enumParam(params, "calc", CALCS, DEFAULT_SCORE_OPTIONS.calc);
-  const sort = enumParam(params, "sort", SORT_KEYS, DEFAULT_SCORE_OPTIONS.sort);
-
-  return {
-    mode,
-    calc,
-    sort,
-    costWeight: numberParam(
-      params,
-      ["costWeight", "cost-weight"],
-      DEFAULT_SCORE_OPTIONS.costWeight,
-    ),
-    costFloor: Math.max(
-      numberParam(params, ["costFloor", "cost-floor"], DEFAULT_SCORE_OPTIONS.costFloor),
-      0.000001,
-    ),
-    costPower: numberParam(params, ["costPower", "cost-power"], DEFAULT_SCORE_OPTIONS.costPower),
-    frontierOnly: booleanParam(
-      params,
-      ["frontier", "frontierOnly", "frontier-only", "pareto", "paretoOnly", "pareto-only"],
-      DEFAULT_SCORE_OPTIONS.frontierOnly,
-    ),
-    limit: limitParam(params),
-  };
-}
-
-export function scoreRows<T extends ParsedModelResult>(
-  results: T[],
-  options: ScoreOptions,
-): ScoreResult<T> {
-  const modeRows = results
-    .map((result) => {
-      const quality = qualityFor(result, options.mode);
-      return quality == null ? null : ({ ...result, quality } as T & { quality: number });
-    })
-    .filter(isNotNull)
-    .filter((result) => {
-      return (
-        isNumber(result.totalCost) &&
-        result.totalCost > 0 &&
-        isNumber(result.intelligence) &&
-        isNumber(result.coding)
-      );
-    }) as ScoredRow<T>[];
-
-  if (modeRows.length === 0) {
-    return { rows: [], topQualityModel: null, effectiveSortBy: options.sort };
-  }
-
-  const topQualityModel = modeRows.reduce((best, row) => (row.quality > best.quality ? row : best));
-
-  for (const row of modeRows) {
-    const safeCost = Math.max(row.totalCost ?? 0, options.costFloor);
-    row.costPenalty = options.costWeight * Math.log10(safeCost / options.costFloor);
-    row.pointsPerK = (row.quality * 1000) / (row.totalCost ?? safeCost);
-    row.costPerQuality = (row.totalCost ?? safeCost) / row.quality;
-    row.deltaTop = row.quality - topQualityModel.quality;
-    row.costVsTop = (row.totalCost ?? safeCost) / (topQualityModel.totalCost ?? safeCost);
-    row.calculated =
-      options.calc === "raw"
-        ? row.quality
-        : options.calc === "sub"
-          ? row.quality - row.costPenalty
-          : row.quality / Math.pow(safeCost, options.costPower);
-    row.frontier = false;
-  }
-
-  let bestQualitySoFar = -Infinity;
-  for (const row of [...modeRows].sort(
-    (a, b) => (a.totalCost ?? 0) - (b.totalCost ?? 0) || b.quality - a.quality,
-  )) {
-    row.frontier = row.quality > bestQualitySoFar + 1e-9;
-    if (row.quality > bestQualitySoFar) bestQualitySoFar = row.quality;
-  }
-
-  const sortFns: Record<SortKey, (row: ScoredRow<T>) => number | string | null> = {
-    score: (row) => row.calculated,
-    quality: (row) => row.quality,
-    value: (row) => row.pointsPerK,
-    cqp: (row) => row.costPerQuality,
-    cost: (row) => row.totalCost,
-    intel: (row) => row.intelligence,
-    coding: (row) => row.coding,
-    agentic: (row) => row.agentic,
-    mmmu: (row) => (row.mmmu == null ? null : row.mmmu * 100),
-    released: (row) => row.releaseDate,
-    name: (row) => row.name,
-  };
-
-  const effectiveSortBy = sortFns[options.sort] ? options.sort : "score";
-  const sortFn = sortFns[effectiveSortBy];
-  const ascendingSorts = new Set<SortKey>(["cost", "cqp", "name"]);
-  const stringSorts = new Set<SortKey>(["released", "name"]);
-
-  const sortableRows = options.frontierOnly ? modeRows.filter((row) => row.frontier) : modeRows;
-
-  const rows = [...sortableRows].sort((a, b) => {
-    const av = sortFn(a);
-    const bv = sortFn(b);
-
-    if (av == null && bv == null) return 0;
-    if (av == null) return 1;
-    if (bv == null) return -1;
-
-    if (stringSorts.has(effectiveSortBy)) {
-      const direction = ascendingSorts.has(effectiveSortBy) ? 1 : -1;
-      return direction * String(av).localeCompare(String(bv));
-    }
-
-    return ascendingSorts.has(effectiveSortBy) ? Number(av) - Number(bv) : Number(bv) - Number(av);
-  });
-
-  return { rows, topQualityModel, effectiveSortBy };
-}
-
-export function qualityFor(result: ParsedModelResult, mode: Mode): number | null {
-  if (mode === "intelligence") return numberOrNull(result.intelligence);
-  if (mode === "coding") return numberOrNull(result.coding);
-  if (mode === "agentic") return numberOrNull(result.agentic);
-  if (mode === "mmmu") {
-    const mmmu = numberOrNull(result.mmmu);
-    return mmmu == null ? null : mmmu * 100;
-  }
-
-  const parts = [result.intelligence, result.coding].map(numberOrNull).filter(isNotNull);
-  const agentic = numberOrNull(result.agentic);
-  if (agentic != null) parts.push(agentic);
-
-  if (parts.length === 0) return null;
-  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
-}
-
-export function scoreOptionsToSearchParams(options: ScoreOptions): URLSearchParams {
-  const params = new URLSearchParams();
-  params.set("mode", options.mode);
-  params.set("calc", options.calc);
-  params.set("sort", options.sort);
-  params.set("frontier", options.frontierOnly ? "1" : "0");
-  params.set("costWeight", String(options.costWeight));
-  params.set("costFloor", String(options.costFloor));
-  params.set("costPower", String(options.costPower));
-  params.set("limit", String(options.limit));
-  return params;
 }
 
 function extractArrayFromHtmlPayload(html: string, keyName: string): unknown[] | null {
@@ -287,6 +107,8 @@ function parseArrayFromCleanPayload(clean: string, keyName: string): unknown[] {
     );
   }
 
+  // Walk the text to find the matching closing bracket, skipping over string
+  // literals (which may contain brackets) and honoring escape sequences.
   const arrayStart = keyPosition + key.length - 1;
   let depth = 0;
 
@@ -322,6 +144,34 @@ function parseArrayFromCleanPayload(clean: string, keyName: string): unknown[] {
   throw new Error(`Could not find the end of the Artificial Analysis ${keyName} array`);
 }
 
+function isEscaped(value: string, quoteIndex: number): boolean {
+  let backslashes = 0;
+  for (let i = quoteIndex - 1; i >= 0 && value[i] === "\\"; i--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 1;
+}
+
+function hasModelScoreFields(input: unknown): boolean {
+  const model = asRecord(input);
+  const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
+
+  return (
+    numberOrNull(model.intelligence_index) != null ||
+    numberOrNull(model.intelligenceIndex) != null ||
+    numberOrNull(model.coding_index) != null ||
+    numberOrNull(model.codingIndex) != null ||
+    numberOrNull(cost.total_cost) != null ||
+    numberOrNull(cost.totalCost) != null
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Normalization
+// ---------------------------------------------------------------------------
+
+// The payload has shipped both snake_case and camelCase field names over
+// time, so every lookup tries both spellings.
 function normalizeModel(input: unknown): ParsedModelResult {
   const model = asRecord(input);
   const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
@@ -353,6 +203,7 @@ function normalizeModel(input: unknown): ParsedModelResult {
   const isOpenWeights = booleanOrNull(model.is_open_weights) ?? booleanOrNull(model.isOpenWeights);
   const isReasoning = booleanOrNull(model.reasoning_model) ?? booleanOrNull(model.isReasoning);
 
+  // Snapshot of the normalized source fields, stored verbatim for audits.
   const rawResult = {
     id: sourceId,
     slug,
@@ -404,90 +255,9 @@ function normalizeModel(input: unknown): ParsedModelResult {
   };
 }
 
-function enumParam<const T extends readonly string[]>(
-  params: URLSearchParams,
-  key: string,
-  values: T,
-  fallback: T[number],
-): T[number] {
-  const value = params.get(key)?.toLowerCase();
-  return values.includes(value ?? "") ? (value as T[number]) : fallback;
-}
-
-function numberParam(
-  params: URLSearchParams,
-  keyOrKeys: string | string[],
-  fallback: number,
-): number {
-  const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-
-  for (const key of keys) {
-    const raw = params.get(key);
-    if (raw == null || raw.trim() === "") continue;
-
-    const value = Number(raw);
-    if (Number.isFinite(value)) return value;
-  }
-
-  return fallback;
-}
-
-function booleanParam(
-  params: URLSearchParams,
-  keyOrKeys: string | string[],
-  fallback: boolean,
-): boolean {
-  const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-
-  for (const key of keys) {
-    if (!params.has(key)) continue;
-
-    const value = (params.get(key) ?? "").trim().toLowerCase();
-    if (["", "1", "true", "yes", "on", "only", "frontier", "pareto"].includes(value)) {
-      return true;
-    }
-    if (["0", "false", "no", "off", "all", "none"].includes(value)) {
-      return false;
-    }
-  }
-
-  return fallback;
-}
-
-function limitParam(params: URLSearchParams): number {
-  const value = params.get("limit") ?? String(DEFAULT_SCORE_OPTIONS.limit);
-  if (["all", "none", "inf", "infinite"].includes(value.toLowerCase())) {
-    return 10000;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0
-    ? Math.min(parsed, 10000)
-    : DEFAULT_SCORE_OPTIONS.limit;
-}
-
-function isScoreableResult(result: ParsedModelResult): boolean {
-  return (
-    isNumber(result.totalCost) &&
-    result.totalCost > 0 &&
-    isNumber(result.intelligence) &&
-    isNumber(result.coding)
-  );
-}
-
-function hasModelScoreFields(input: unknown): boolean {
-  const model = asRecord(input);
-  const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
-
-  return (
-    numberOrNull(model.intelligence_index) != null ||
-    numberOrNull(model.intelligenceIndex) != null ||
-    numberOrNull(model.coding_index) != null ||
-    numberOrNull(model.codingIndex) != null ||
-    numberOrNull(cost.total_cost) != null ||
-    numberOrNull(cost.totalCost) != null
-  );
-}
+// ---------------------------------------------------------------------------
+// Value coercion
+// ---------------------------------------------------------------------------
 
 function firstRecord(...values: unknown[]): Record<string, unknown> {
   for (const value of values) {
@@ -504,14 +274,6 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isEscaped(value: string, quoteIndex: number): boolean {
-  let backslashes = 0;
-  for (let i = quoteIndex - 1; i >= 0 && value[i] === "\\"; i--) {
-    backslashes++;
-  }
-  return backslashes % 2 === 1;
-}
-
 function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -526,10 +288,6 @@ function stringOrNull(value: unknown): string | null {
 
 function booleanOrNull(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
-}
-
-function isNotNull<T>(value: T | null): value is T {
-  return value !== null;
 }
 
 function slugify(value: string): string {

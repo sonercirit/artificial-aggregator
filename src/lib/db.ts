@@ -1,9 +1,16 @@
+/**
+ * All D1 access. Queries use raw SQL on purpose: Drizzle owns the schema and
+ * migrations (src/db/schema.ts), while the Worker keeps its hot path free of
+ * query-builder overhead.
+ */
+
 import type { ParsedModelResult } from "./aa";
 import { PARSER_VERSION } from "./aa";
 import type { Bindings } from "../types";
 
 export type FetchRunStatus = "running" | "success" | "error" | "skipped";
 
+/** Row shape of fetch_runs; field names mirror the SQL columns. */
 export type FetchRun = {
   id: number;
   source_url: string;
@@ -22,6 +29,7 @@ export type FetchRun = {
   error: string | null;
 };
 
+/** Row shape of model_results; field names mirror the SQL columns. */
 export type ModelResultRow = {
   id: number;
   run_id: number;
@@ -71,74 +79,14 @@ export type TimelineRun = {
   completed_at: string | null;
 };
 
-export type CompleteRunInput = {
-  durationMs: number;
-  httpStatus: number | null;
-  htmlBytes: number | null;
-  htmlSha256: string | null;
-  htmlGzipBytes: number | null;
-  modelCount: number;
-  resultCount: number;
-  completedAt?: string;
-};
+/** SQL mirror of isScoreable() in aa.ts; expects model_results aliased as mr. */
+const SCOREABLE_SQL = `mr.total_cost > 0
+           AND mr.intelligence IS NOT NULL
+           AND mr.coding IS NOT NULL`;
 
-export type RunProgressInput = {
-  httpStatus?: number | null;
-  htmlBytes?: number | null;
-  htmlSha256?: string | null;
-  htmlGzipBytes?: number | null;
-  modelCount?: number | null;
-  resultCount?: number | null;
-};
-
-export type PruneStoredRunDataInput = {
-  keepRuns?: number;
-  keepRawRuns?: number;
-  keepRawResultRuns?: number;
-};
-
-export type PruneStoredRunDataResult = {
-  deletedRuns: number;
-  deletedRawChunks: number;
-  prunedRunMetadata: number;
-  prunedRawResultJson: number;
-};
-
-export async function markStaleRunningRuns(
-  env: Bindings,
-  olderThanMs = 20 * 60 * 1000,
-): Promise<number> {
-  const now = new Date();
-  const cutoff = new Date(now.getTime() - olderThanMs).toISOString();
-  const nowIso = now.toISOString();
-  const result = await env.DB.prepare(
-    `UPDATE fetch_runs
-     SET status = 'error',
-         completed_at = ?,
-         duration_ms = COALESCE(duration_ms, ?),
-         error = 'Worker was canceled or timed out before it could record a failure. raw_chunks=' ||
-           (SELECT COUNT(*) FROM raw_html_chunks WHERE raw_html_chunks.run_id = fetch_runs.id) ||
-           ', model_rows=' ||
-           (SELECT COUNT(*) FROM model_results WHERE model_results.run_id = fetch_runs.id)
-     WHERE status = 'running' AND started_at < ?`,
-  )
-    .bind(nowIso, olderThanMs, cutoff)
-    .run();
-
-  return Number(result.meta.changes ?? 0);
-}
-
-export async function getActiveRun(env: Bindings): Promise<FetchRun | null> {
-  const cutoff = new Date(Date.now() - 55 * 60 * 1000).toISOString();
-  return env.DB.prepare(
-    `SELECT * FROM fetch_runs
-     WHERE status = 'running' AND started_at >= ?
-     ORDER BY started_at DESC
-     LIMIT 1`,
-  )
-    .bind(cutoff)
-    .first<FetchRun>();
-}
+// ---------------------------------------------------------------------------
+// Run lifecycle
+// ---------------------------------------------------------------------------
 
 export async function createFetchRun(
   env: Bindings,
@@ -166,6 +114,16 @@ export async function createFetchRun(
   return id;
 }
 
+export type RunProgressInput = {
+  httpStatus?: number | null;
+  htmlBytes?: number | null;
+  htmlSha256?: string | null;
+  htmlGzipBytes?: number | null;
+  modelCount?: number | null;
+  resultCount?: number | null;
+};
+
+/** Records whatever is known so far; null/omitted fields keep their stored value. */
 export async function updateFetchRunProgress(
   env: Bindings,
   runId: number,
@@ -192,6 +150,17 @@ export async function updateFetchRunProgress(
     )
     .run();
 }
+
+export type CompleteRunInput = {
+  durationMs: number;
+  httpStatus: number | null;
+  htmlBytes: number | null;
+  htmlSha256: string | null;
+  htmlGzipBytes: number | null;
+  modelCount: number;
+  resultCount: number;
+  completedAt?: string;
+};
 
 export async function completeFetchRun(
   env: Bindings,
@@ -263,69 +232,84 @@ export async function failFetchRun(
     .run();
 }
 
-export async function pruneStoredRunData(
+/**
+ * Flags runs stuck in 'running' (Worker canceled/timed out before recording
+ * an outcome) as errors, annotated with what they managed to store.
+ */
+export async function markStaleRunningRuns(
   env: Bindings,
-  input: PruneStoredRunDataInput = {},
-): Promise<PruneStoredRunDataResult> {
-  const keepRuns = positiveLimit(input.keepRuns, 1500);
-  const keepRawRuns = Math.min(positiveLimit(input.keepRawRuns, 72), keepRuns);
-  const keepRawResultRuns = Math.min(positiveLimit(input.keepRawResultRuns, 500), keepRuns);
-
-  const deletedRawChunks = await env.DB.prepare(
-    `DELETE FROM raw_html_chunks
-     WHERE run_id NOT IN (
-       SELECT id FROM fetch_runs
-       ORDER BY started_at DESC, id DESC
-       LIMIT ?
-     )`,
-  )
-    .bind(keepRawRuns)
-    .run();
-
-  const prunedRunMetadata = await env.DB.prepare(
+  olderThanMs = 20 * 60 * 1000,
+): Promise<number> {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - olderThanMs).toISOString();
+  const nowIso = now.toISOString();
+  const result = await env.DB.prepare(
     `UPDATE fetch_runs
-     SET raw_html_encoding = 'pruned'
-     WHERE raw_html_encoding <> 'pruned'
-       AND id NOT IN (
-         SELECT id FROM fetch_runs
-         ORDER BY started_at DESC, id DESC
-         LIMIT ?
-       )`,
+     SET status = 'error',
+         completed_at = ?,
+         duration_ms = COALESCE(duration_ms, ?),
+         error = 'Worker was canceled or timed out before it could record a failure. raw_chunks=' ||
+           (SELECT COUNT(*) FROM raw_html_chunks WHERE raw_html_chunks.run_id = fetch_runs.id) ||
+           ', model_rows=' ||
+           (SELECT COUNT(*) FROM model_results WHERE model_results.run_id = fetch_runs.id)
+     WHERE status = 'running' AND started_at < ?`,
   )
-    .bind(keepRawRuns)
+    .bind(nowIso, olderThanMs, cutoff)
     .run();
 
-  const prunedRawResultJson = await env.DB.prepare(
-    `UPDATE model_results
-     SET raw_result_json = '{}'
-     WHERE raw_result_json <> '{}'
-       AND run_id NOT IN (
-         SELECT id FROM fetch_runs
-         ORDER BY started_at DESC, id DESC
-         LIMIT ?
-       )`,
-  )
-    .bind(keepRawResultRuns)
-    .run();
-
-  const deletedRuns = await env.DB.prepare(
-    `DELETE FROM fetch_runs
-     WHERE id NOT IN (
-       SELECT id FROM fetch_runs
-       ORDER BY started_at DESC, id DESC
-       LIMIT ?
-     )`,
-  )
-    .bind(keepRuns)
-    .run();
-
-  return {
-    deletedRuns: dbChanges(deletedRuns),
-    deletedRawChunks: dbChanges(deletedRawChunks),
-    prunedRunMetadata: dbChanges(prunedRunMetadata),
-    prunedRawResultJson: dbChanges(prunedRawResultJson),
-  };
+  return Number(result.meta.changes ?? 0);
 }
+
+/** A run still plausibly executing (started within the last 55 minutes). */
+export async function getActiveRun(env: Bindings): Promise<FetchRun | null> {
+  const cutoff = new Date(Date.now() - 55 * 60 * 1000).toISOString();
+  return env.DB.prepare(
+    `SELECT * FROM fetch_runs
+     WHERE status = 'running' AND started_at >= ?
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  )
+    .bind(cutoff)
+    .first<FetchRun>();
+}
+
+/**
+ * Failed or abandoned runs whose raw HTML made it to storage but whose model
+ * rows did not — these can be re-parsed from the stored snapshot.
+ */
+export async function getRepairableRawRuns(
+  env: Bindings,
+  limit = 2,
+  olderThanMs = 20 * 60 * 1000,
+): Promise<FetchRun[]> {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const { results = [] } = await env.DB.prepare(
+    `SELECT fr.*
+     FROM fetch_runs fr
+     WHERE fr.status IN ('running', 'error')
+       AND (fr.status = 'error' OR fr.started_at < ?)
+       AND fr.http_status BETWEEN 200 AND 299
+       AND fr.raw_html_encoding <> 'pruned'
+       AND EXISTS (
+         SELECT 1 FROM raw_html_chunks rhc
+         WHERE rhc.run_id = fr.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM model_results mr
+         WHERE mr.run_id = fr.id
+       )
+     ORDER BY fr.started_at DESC, fr.id DESC
+     LIMIT ?`,
+  )
+    .bind(cutoff, limit)
+    .all<FetchRun>();
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot storage and retention
+// ---------------------------------------------------------------------------
 
 export async function storeRawHtmlChunks(
   env: Bindings,
@@ -420,21 +404,103 @@ export async function storeModelResults(
   await batchStatements(env, statements, 80);
 }
 
-export async function getLatestSuccessfulRun(env: Bindings): Promise<FetchRun | null> {
-  return env.DB.prepare(
-    `SELECT * FROM fetch_runs
-     WHERE status = 'success'
-       AND EXISTS (
-         SELECT 1 FROM model_results mr
-         WHERE mr.run_id = fetch_runs.id
-           AND mr.total_cost > 0
-           AND mr.intelligence IS NOT NULL
-           AND mr.coding IS NOT NULL
-       )
-     ORDER BY completed_at DESC, id DESC
-     LIMIT 1`,
-  ).first<FetchRun>();
+export async function getRawHtmlBase64Chunks(env: Bindings, runId: number): Promise<string[]> {
+  const { results = [] } = await env.DB.prepare(
+    `SELECT data FROM raw_html_chunks
+     WHERE run_id = ?
+     ORDER BY chunk_index ASC`,
+  )
+    .bind(runId)
+    .all<{ data: string }>();
+
+  return results.map((row) => row.data);
 }
+
+export type PruneStoredRunDataInput = {
+  keepRuns?: number;
+  keepRawRuns?: number;
+  keepRawResultRuns?: number;
+};
+
+export type PruneStoredRunDataResult = {
+  deletedRuns: number;
+  deletedRawChunks: number;
+  prunedRunMetadata: number;
+  prunedRawResultJson: number;
+};
+
+/**
+ * Keeps D1 below its size limits: raw HTML chunks survive only for the most
+ * recent runs, per-model raw JSON a while longer, and run/score history the
+ * longest. Defaults: 72 raw-HTML runs, 500 raw-JSON runs, 1500 runs total.
+ */
+export async function pruneStoredRunData(
+  env: Bindings,
+  input: PruneStoredRunDataInput = {},
+): Promise<PruneStoredRunDataResult> {
+  const keepRuns = positiveLimit(input.keepRuns, 1500);
+  const keepRawRuns = Math.min(positiveLimit(input.keepRawRuns, 72), keepRuns);
+  const keepRawResultRuns = Math.min(positiveLimit(input.keepRawResultRuns, 500), keepRuns);
+
+  const deletedRawChunks = await env.DB.prepare(
+    `DELETE FROM raw_html_chunks
+     WHERE run_id NOT IN (
+       SELECT id FROM fetch_runs
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?
+     )`,
+  )
+    .bind(keepRawRuns)
+    .run();
+
+  const prunedRunMetadata = await env.DB.prepare(
+    `UPDATE fetch_runs
+     SET raw_html_encoding = 'pruned'
+     WHERE raw_html_encoding <> 'pruned'
+       AND id NOT IN (
+         SELECT id FROM fetch_runs
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?
+       )`,
+  )
+    .bind(keepRawRuns)
+    .run();
+
+  const prunedRawResultJson = await env.DB.prepare(
+    `UPDATE model_results
+     SET raw_result_json = '{}'
+     WHERE raw_result_json <> '{}'
+       AND run_id NOT IN (
+         SELECT id FROM fetch_runs
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?
+       )`,
+  )
+    .bind(keepRawResultRuns)
+    .run();
+
+  const deletedRuns = await env.DB.prepare(
+    `DELETE FROM fetch_runs
+     WHERE id NOT IN (
+       SELECT id FROM fetch_runs
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?
+     )`,
+  )
+    .bind(keepRuns)
+    .run();
+
+  return {
+    deletedRuns: dbChanges(deletedRuns),
+    deletedRawChunks: dbChanges(deletedRawChunks),
+    prunedRunMetadata: dbChanges(prunedRunMetadata),
+    prunedRawResultJson: dbChanges(prunedRawResultJson),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Read queries
+// ---------------------------------------------------------------------------
 
 export async function getRun(env: Bindings, runId: number): Promise<FetchRun | null> {
   return env.DB.prepare("SELECT * FROM fetch_runs WHERE id = ?").bind(runId).first<FetchRun>();
@@ -451,6 +517,20 @@ export async function getRuns(env: Bindings, limit = 100): Promise<FetchRun[]> {
   return results;
 }
 
+export async function getLatestSuccessfulRun(env: Bindings): Promise<FetchRun | null> {
+  return env.DB.prepare(
+    `SELECT * FROM fetch_runs
+     WHERE status = 'success'
+       AND EXISTS (
+         SELECT 1 FROM model_results mr
+         WHERE mr.run_id = fetch_runs.id
+           AND ${SCOREABLE_SQL}
+       )
+     ORDER BY completed_at DESC, id DESC
+     LIMIT 1`,
+  ).first<FetchRun>();
+}
+
 export async function getResultsForRun(env: Bindings, runId: number): Promise<ParsedModelResult[]> {
   const { results = [] } = await env.DB.prepare(
     `SELECT * FROM model_results
@@ -461,6 +541,24 @@ export async function getResultsForRun(env: Bindings, runId: number): Promise<Pa
     .all<ModelResultRow>();
 
   return results.map(rowToModelResult);
+}
+
+export async function getModelSummaries(env: Bindings): Promise<ModelSummary[]> {
+  const { results = [] } = await env.DB.prepare(
+    `SELECT
+        mr.model_key,
+        mr.name,
+        COUNT(*) AS samples,
+        MAX(fr.completed_at) AS latest_at
+     FROM model_results mr
+     JOIN fetch_runs fr ON fr.id = mr.run_id
+     WHERE fr.status = 'success'
+       AND ${SCOREABLE_SQL}
+     GROUP BY mr.model_key
+     ORDER BY LOWER(mr.name) ASC`,
+  ).all<ModelSummary>();
+
+  return results;
 }
 
 export async function getTimelineForModel(
@@ -478,9 +576,7 @@ export async function getTimelineForModel(
      JOIN fetch_runs fr ON fr.id = mr.run_id
      WHERE mr.model_key = ?
        AND fr.status = 'success'
-       AND mr.total_cost > 0
-       AND mr.intelligence IS NOT NULL
-       AND mr.coding IS NOT NULL
+       AND ${SCOREABLE_SQL}
      ORDER BY fr.completed_at ASC, fr.id ASC
      LIMIT ?`,
   )
@@ -488,36 +584,6 @@ export async function getTimelineForModel(
     .all<ModelResultRow & TimelineColumns>();
 
   return results.map(rowToTimelineResult);
-}
-
-export async function getRepairableRawRuns(
-  env: Bindings,
-  limit = 2,
-  olderThanMs = 20 * 60 * 1000,
-): Promise<FetchRun[]> {
-  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-  const { results = [] } = await env.DB.prepare(
-    `SELECT fr.*
-     FROM fetch_runs fr
-     WHERE fr.status IN ('running', 'error')
-       AND (fr.status = 'error' OR fr.started_at < ?)
-       AND fr.http_status BETWEEN 200 AND 299
-       AND fr.raw_html_encoding <> 'pruned'
-       AND EXISTS (
-         SELECT 1 FROM raw_html_chunks rhc
-         WHERE rhc.run_id = fr.id
-       )
-       AND NOT EXISTS (
-         SELECT 1 FROM model_results mr
-         WHERE mr.run_id = fr.id
-       )
-     ORDER BY fr.started_at DESC, fr.id DESC
-     LIMIT ?`,
-  )
-    .bind(cutoff, limit)
-    .all<FetchRun>();
-
-  return results;
 }
 
 export async function getSuccessfulTimelineRuns(
@@ -531,9 +597,7 @@ export async function getSuccessfulTimelineRuns(
        AND EXISTS (
          SELECT 1 FROM model_results mr
          WHERE mr.run_id = fr.id
-           AND mr.total_cost > 0
-           AND mr.intelligence IS NOT NULL
-           AND mr.coding IS NOT NULL
+           AND ${SCOREABLE_SQL}
        )
      ORDER BY fr.completed_at DESC, fr.id DESC
      LIMIT ?`,
@@ -544,6 +608,11 @@ export async function getSuccessfulTimelineRuns(
   return results;
 }
 
+/**
+ * Scoreable results for a batch of runs. Selects only the columns scoring
+ * needs — fetching full rows for many runs at once overruns D1's response
+ * size limits (callers batch run ids for the same reason).
+ */
 export async function getTimelineResultsForRuns(
   env: Bindings,
   runIds: number[],
@@ -571,9 +640,7 @@ export async function getTimelineResultsForRuns(
      JOIN fetch_runs fr ON fr.id = mr.run_id
      WHERE mr.run_id IN (${placeholders})
        AND fr.status = 'success'
-       AND mr.total_cost > 0
-       AND mr.intelligence IS NOT NULL
-       AND mr.coding IS NOT NULL
+       AND ${SCOREABLE_SQL}
      ORDER BY fr.completed_at ASC, fr.id ASC, LOWER(mr.name) ASC`,
   )
     .bind(...ids)
@@ -582,52 +649,9 @@ export async function getTimelineResultsForRuns(
   return results.map(rowToScoreTimelineResult);
 }
 
-export async function getResultsForSuccessfulRuns(
-  env: Bindings,
-  runLimit = 500,
-): Promise<TimelineResult[]> {
-  const runs = await getSuccessfulTimelineRuns(env, runLimit);
-  const allResults: TimelineResult[] = [];
-
-  for (let i = 0; i < runs.length; i += 50) {
-    const runIds = runs.slice(i, i + 50).map((run) => run.id);
-    allResults.push(...(await getTimelineResultsForRuns(env, runIds)));
-  }
-
-  return allResults.sort(compareTimelineResults);
-}
-
-export async function getModelSummaries(env: Bindings): Promise<ModelSummary[]> {
-  const { results = [] } = await env.DB.prepare(
-    `SELECT
-        mr.model_key,
-        mr.name,
-        COUNT(*) AS samples,
-        MAX(fr.completed_at) AS latest_at
-     FROM model_results mr
-     JOIN fetch_runs fr ON fr.id = mr.run_id
-     WHERE fr.status = 'success'
-       AND mr.total_cost > 0
-       AND mr.intelligence IS NOT NULL
-       AND mr.coding IS NOT NULL
-     GROUP BY mr.model_key
-     ORDER BY LOWER(mr.name) ASC`,
-  ).all<ModelSummary>();
-
-  return results;
-}
-
-export async function getRawHtmlBase64Chunks(env: Bindings, runId: number): Promise<string[]> {
-  const { results = [] } = await env.DB.prepare(
-    `SELECT data FROM raw_html_chunks
-     WHERE run_id = ?
-     ORDER BY chunk_index ASC`,
-  )
-    .bind(runId)
-    .all<{ data: string }>();
-
-  return results.map((row) => row.data);
-}
+// ---------------------------------------------------------------------------
+// Row mapping
+// ---------------------------------------------------------------------------
 
 type TimelineColumns = {
   timeline_run_id: number;
@@ -648,6 +672,35 @@ type ScoreModelResultRow = {
   mmmu: number | null;
 };
 
+function rowToModelResult(row: ModelResultRow): ParsedModelResult {
+  return {
+    modelKey: row.model_key,
+    sourceId: row.source_id,
+    slug: row.slug,
+    name: row.name,
+    shortName: row.short_name,
+    creatorName: row.creator_name,
+    creatorSlug: row.creator_slug,
+    releaseDate: row.release_date,
+    cutoffDate: row.knowledge_cutoff_date,
+    totalCost: row.total_cost,
+    inputCost: row.input_cost,
+    outputCost: row.output_cost,
+    reasoningCost: row.reasoning_cost,
+    answerCost: row.answer_cost,
+    intelligence: row.intelligence,
+    coding: row.coding,
+    agentic: row.agentic,
+    mmmu: row.mmmu,
+    priceInput1m: row.price_input_1m,
+    priceOutput1m: row.price_output_1m,
+    activeParams: row.active_params,
+    isOpenWeights: intToBool(row.is_open_weights),
+    isReasoning: intToBool(row.is_reasoning),
+    rawResultJson: row.raw_result_json,
+  };
+}
+
 function rowToTimelineResult(row: ModelResultRow & TimelineColumns): TimelineResult {
   return {
     ...rowToModelResult(row),
@@ -657,6 +710,7 @@ function rowToTimelineResult(row: ModelResultRow & TimelineColumns): TimelineRes
   };
 }
 
+/** Expands the narrow scoring projection back to the full result shape. */
 function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): TimelineResult {
   return {
     modelKey: row.model_key,
@@ -689,40 +743,9 @@ function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): T
   };
 }
 
-function compareTimelineResults(a: TimelineResult, b: TimelineResult): number {
-  return String(a.runCompletedAt ?? a.runStartedAt).localeCompare(
-    String(b.runCompletedAt ?? b.runStartedAt),
-  );
-}
-
-function rowToModelResult(row: ModelResultRow): ParsedModelResult {
-  return {
-    modelKey: row.model_key,
-    sourceId: row.source_id,
-    slug: row.slug,
-    name: row.name,
-    shortName: row.short_name,
-    creatorName: row.creator_name,
-    creatorSlug: row.creator_slug,
-    releaseDate: row.release_date,
-    cutoffDate: row.knowledge_cutoff_date,
-    totalCost: row.total_cost,
-    inputCost: row.input_cost,
-    outputCost: row.output_cost,
-    reasoningCost: row.reasoning_cost,
-    answerCost: row.answer_cost,
-    intelligence: row.intelligence,
-    coding: row.coding,
-    agentic: row.agentic,
-    mmmu: row.mmmu,
-    priceInput1m: row.price_input_1m,
-    priceOutput1m: row.price_output_1m,
-    activeParams: row.active_params,
-    isOpenWeights: intToBool(row.is_open_weights),
-    isReasoning: intToBool(row.is_reasoning),
-    rawResultJson: row.raw_result_json,
-  };
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 async function batchStatements(
   env: Bindings,
