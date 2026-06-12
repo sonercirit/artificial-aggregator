@@ -4,8 +4,8 @@
  * public/assets/app.css and app.js.
  */
 
-import type { TimeSeriesPoint } from "./charts";
-import { renderTimeSeriesChart } from "./charts";
+import type { ScatterPoint, TimeSeriesPoint } from "./charts";
+import { renderLogScatterChart, renderTimeSeriesChart } from "./charts";
 import type { FetchRun, ModelSummary, TimelineResult } from "./db";
 import {
   escapeHtml,
@@ -82,22 +82,38 @@ const HELP = {
     "For div scoring, exponent applied to benchmark cost. Use 0.5 for sqrt(cost), 0 to ignore cost.",
   limit: "Maximum number of rows shown in the comparison table.",
   winner: "Tracks the top-ranked model for each successful snapshot using the current filters.",
+  scatter:
+    "Every model in this snapshot plotted as benchmark cost (log scale) versus the selected quality metric. Highlighted dots are the Pareto frontier; the staircase line shows the best quality available at or below each cost. Click a dot to open that model's timeline.",
 } as const;
 
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
 
+const SITE_ORIGIN = "https://artificialaggregator.com";
+const SITE_DESCRIPTION =
+  "Hourly Artificial Analysis snapshots: compare LLM quality scores against benchmark cost, explore the Pareto frontier, and track the historic #1 model.";
+
 export function layout(title: string, body: string, context: RenderContext = {}): string {
   const theme = normalizeTheme(context.theme);
   const currentPath = context.currentPath ?? "/";
+  const canonicalUrl = `${SITE_ORIGIN}${currentPath.split("?")[0]}`;
+  const fullTitle = `${title} · Artificial Aggregator`;
 
   return `<!doctype html>
 <html lang="en" data-theme="${escapeHtml(theme)}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${escapeHtml(title)} · Artificial Aggregator</title>
+  <title>${escapeHtml(fullTitle)}</title>
+  <meta name="description" content="${escapeHtml(SITE_DESCRIPTION)}" />
+  <link rel="canonical" href="${escapeHtml(canonicalUrl)}" />
+  <meta property="og:site_name" content="Artificial Aggregator" />
+  <meta property="og:title" content="${escapeHtml(fullTitle)}" />
+  <meta property="og:description" content="${escapeHtml(SITE_DESCRIPTION)}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="${escapeHtml(canonicalUrl)}" />
+  <meta name="twitter:card" content="summary" />
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/assets/app.css" />
   <script src="/assets/app.js" defer></script>
@@ -174,6 +190,7 @@ export function renderHome(
     </section>
     ${renderScoreForm(options, runs, selectedRunId)}
     ${topQualityModel ? `<p class="muted">Top quality model in this view: <strong>${escapeHtml(topQualityModel.name)}</strong> (${fmt(topQualityModel.quality, 1)} pts, ${formatMoney(topQualityModel.totalCost)}) · sorted by <strong>${escapeHtml(effectiveSortBy)}</strong></p>` : ""}
+    ${run ? renderCostQualityScatter(rows, options) : ""}
     ${run ? renderWinnerTimeline(winnerTimeline, options, effectiveSortBy) : ""}
     ${run ? renderScoresTable(visibleRows, options) : ""}`,
     context,
@@ -231,6 +248,7 @@ export function renderRunDetail(
       ${run.error ? `<p class="notice danger">${escapeHtml(run.error)}</p>` : ""}
     </section>
     ${topQualityModel ? `<p class="muted">Top quality: <strong>${escapeHtml(topQualityModel.name)}</strong> (${fmt(topQualityModel.quality, 1)} pts)</p>` : ""}
+    ${renderCostQualityScatter(rows, options)}
     ${renderScoresTable(rows.slice(0, options.limit), options)}`,
     context,
   );
@@ -332,6 +350,76 @@ export function renderErrorPage(
     `<section class="hero"><h1>${escapeHtml(title)}</h1><p class="notice danger">${escapeHtml(message)}</p></section>`,
     context,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Cost vs quality scatter
+// ---------------------------------------------------------------------------
+
+function renderCostQualityScatter(rows: ScoredRow[], options: ScoreOptions): string {
+  const params = scoreOptionsToSearchParams(options);
+  const plottable = rows.filter(
+    (row) =>
+      row.totalCost != null &&
+      Number.isFinite(row.totalCost) &&
+      row.totalCost > 0 &&
+      Number.isFinite(row.quality),
+  );
+  if (plottable.length === 0) return "";
+
+  const points: ScatterPoint[] = plottable.map((row) => ({
+    x: row.totalCost as number,
+    y: row.quality,
+    tip: `${row.name} · Cost: ${formatMoney(row.totalCost)} · Quality: ${fmt(row.quality, 1)}${row.frontier ? " · Pareto frontier" : ""}`,
+    href: `/models/${encodeURIComponent(row.modelKey)}?${params.toString()}`,
+    label: row.frontier ? truncate(row.shortName ?? row.name, 18) : undefined,
+    emphasized: row.frontier,
+  }));
+
+  // The frontier staircase: best quality available at or below each cost.
+  const frontier = plottable
+    .filter((row) => row.frontier)
+    .sort((a, b) => (a.totalCost as number) - (b.totalCost as number));
+  const staircase: Array<{ x: number; y: number }> = [];
+  for (const [index, row] of frontier.entries()) {
+    const x = row.totalCost as number;
+    if (index > 0) staircase.push({ x, y: frontier[index - 1].quality });
+    staircase.push({ x, y: row.quality });
+  }
+
+  const svg = renderLogScatterChart({
+    points,
+    line: staircase,
+    width: 960,
+    height: 430,
+    pad: 58,
+    ariaLabel: "Benchmark cost versus quality scatter with Pareto frontier",
+    lineClass: "scatter-frontier-line",
+    dotClass: "chart-entry scatter-dot",
+    emphasizedDotClass: "scatter-dot-frontier",
+    labelClass: "scatter-label",
+    xAxisLabel: "benchmark cost, log scale",
+    yAxisLabel: `${options.mode} quality`,
+    xFormat: formatMoneyTick,
+    yFormat: (value) => fmt(value, 0),
+  });
+
+  return `<section class="scatter-panel">
+    <h2>${headingWithTip("Cost vs quality", HELP.scatter)}</h2>
+    <p class="muted">${plottable.length} models · ${frontier.length} on the Pareto frontier · <strong>${escapeHtml(options.mode)}</strong> quality vs benchmark cost</p>
+    ${svg}
+  </section>`;
+}
+
+/** Compact dollar labels for log-axis ticks: $0.20, $2, $50, $2k. */
+function formatMoneyTick(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  if (value >= 1000) {
+    const thousands = value / 1000;
+    return `$${(thousands >= 10 ? thousands.toFixed(0) : thousands.toFixed(1)).replace(/\.0$/, "")}k`;
+  }
+  if (value >= 1) return `$${value.toFixed(value >= 10 ? 0 : value % 1 === 0 ? 0 : 2)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 // ---------------------------------------------------------------------------

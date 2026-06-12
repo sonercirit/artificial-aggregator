@@ -964,6 +964,52 @@ svg text {
   fill: var(--chart-cost);
 }
 
+/* Cost vs quality scatter */
+.scatter-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  margin: 20px 0;
+}
+.scatter-panel h2 {
+  margin: 0 0 4px;
+}
+.scatter-panel .muted {
+  margin: 0 0 12px;
+}
+svg .scatter-dot {
+  fill: var(--muted);
+  opacity: 0.55;
+}
+svg .scatter-dot-frontier {
+  fill: var(--good);
+  opacity: 1;
+}
+svg a .chart-entry {
+  cursor: pointer;
+}
+.scatter-frontier-line {
+  stroke: var(--good);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  opacity: 0.75;
+}
+.scatter-label {
+  fill: var(--text);
+  font-size: 11px;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+svg .axis-caption {
+  fill: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 /* ==========================================================================
    Responsive
    ========================================================================== */
