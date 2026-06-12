@@ -35,6 +35,14 @@ wrangler secret put ADMIN_TOKEN
 npm run dev
 ```
 
+Checks (all three run in CI):
+
+```bash
+npm run typecheck
+npm test
+npm run format:check
+```
+
 Trigger a local/manual fetch:
 
 ```bash
@@ -51,7 +59,7 @@ The cron in `wrangler.toml` runs at minute `0` every hour.
 
 ## Useful routes
 
-- `/` latest comparison table with mode/cost scoring controls, Pareto-frontier filter, tooltips, and 20 persisted UI themes
+- `/` latest comparison table with mode/cost scoring controls, a log-scale cost-vs-quality scatter with the Pareto frontier staircase, Pareto-frontier filter, tooltips, and 20 persisted UI themes
 - `/runs` all fetch executions
 - `/runs/:id` one execution
 - `/runs/:id/raw` exact raw HTML for that execution (decompressed from D1 chunks)
