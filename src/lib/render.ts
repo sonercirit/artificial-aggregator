@@ -12,13 +12,14 @@ import {
   fmt,
   formatBytes,
   formatDateTime,
-  formatMoney,
+  formatTaskCost,
+  formatTaskTime,
   link,
   roundForDisplay,
   truncate,
 } from "./html";
-import type { ScoreOptions, ScoredRow } from "./scoring";
-import { CALCS, MODES, SORT_KEYS, scoreOptionsToSearchParams } from "./scoring";
+import type { FrontierMetric, ScoreOptions, ScoredRow } from "./scoring";
+import { CALCS, FRONTIER_METRICS, MODES, SORT_KEYS, scoreOptionsToSearchParams } from "./scoring";
 
 export type RenderContext = {
   theme?: string | null;
@@ -70,20 +71,22 @@ const HELP = {
   theme: "Switch the UI color palette. Your selection is saved in this browser.",
   run: "Choose a stored fetch snapshot. Leave as latest to use the newest successful run with score/cost data.",
   mode: "The quality dimension used for ranking: combined averages AA intelligence, coding, and agentic scores when available.",
-  calc: "How the final score is computed: raw ignores cost, sub subtracts a logarithmic cost penalty, and div divides quality by cost^power.",
+  calc: "How the final score is computed: raw ignores cost, sub subtracts a logarithmic Cost per Task penalty, and div divides quality by cost^power.",
   sort: "Column used to rank the comparison table and historic #1 winner timeline.",
   frontier:
-    "Show only models on the Pareto frontier for the selected quality mode: no cheaper model has a higher selected quality score.",
+    "Show only models on the Pareto frontier for the selected quality mode and Pareto axis.",
+  frontierMetric:
+    "Choose the Pareto x-axis: Cost per Task finds models not beaten by cheaper models; Time per Task finds models not beaten by faster models.",
   costWeight:
     "For sub scoring, quality points subtracted for each 10x increase above the cost floor.",
   costFloor:
-    "Minimum benchmark cost used in cost-adjusted formulas. Costs below this are treated as this value.",
+    "Minimum Cost per Task used in cost-adjusted formulas. Costs below this are treated as this value.",
   costPower:
-    "For div scoring, exponent applied to benchmark cost. Use 0.5 for sqrt(cost), 0 to ignore cost.",
+    "For div scoring, exponent applied to Cost per Task. Use 0.5 for sqrt(cost), 0 to ignore cost.",
   limit: "Maximum number of rows shown in the comparison table.",
   winner: "Tracks the top-ranked model for each successful snapshot using the current filters.",
   scatter:
-    "Every model in this snapshot plotted as benchmark cost (log scale) versus the selected quality metric. Highlighted dots are the Pareto frontier; the staircase line shows the best quality available at or below each cost. Click a dot to open that model's timeline.",
+    "Every model in this snapshot plotted as the selected Pareto axis (log scale) versus the selected quality metric. Highlighted dots are the Pareto frontier; the staircase line shows the best quality available at or below each cost/time. Click a dot to open that model's timeline.",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -92,7 +95,7 @@ const HELP = {
 
 const SITE_ORIGIN = "https://artificialaggregator.com";
 const SITE_DESCRIPTION =
-  "Hourly Artificial Analysis snapshots: compare LLM quality scores against benchmark cost, explore the Pareto frontier, and track the historic #1 model.";
+  "Hourly Artificial Analysis snapshots: compare LLM quality scores against Cost per Task, Time per Task, and the Pareto frontier.";
 
 export function layout(title: string, body: string, context: RenderContext = {}): string {
   const theme = normalizeTheme(context.theme);
@@ -185,11 +188,11 @@ export function renderHome(
   return layout(
     "Scores",
     `<section class="hero">
-      <h1>AA score/cost comparison</h1>
+      <h1>AA score/cost/time comparison</h1>
       ${intro}
     </section>
     ${renderScoreForm(options, runs, selectedRunId)}
-    ${topQualityModel ? `<p class="muted">Top quality model in this view: <strong>${escapeHtml(topQualityModel.name)}</strong> (${fmt(topQualityModel.quality, 1)} pts, ${formatMoney(topQualityModel.totalCost)}) · sorted by <strong>${escapeHtml(effectiveSortBy)}</strong></p>` : ""}
+    ${topQualityModel ? `<p class="muted">Top quality model in this view: <strong>${escapeHtml(topQualityModel.name)}</strong> (${fmt(topQualityModel.quality, 1)} pts, ${formatTaskCost(topQualityModel.costForScoring)}/task${topQualityModel.timePerTask == null ? "" : `, ${formatTaskTime(topQualityModel.timePerTask)}/task`}) · sorted by <strong>${escapeHtml(effectiveSortBy)}</strong></p>` : ""}
     ${run ? renderCostQualityScatter(rows, options) : ""}
     ${run ? renderWinnerTimeline(winnerTimeline, options, effectiveSortBy) : ""}
     ${run ? renderScoresTable(visibleRows, options) : ""}`,
@@ -268,7 +271,7 @@ export function renderHistory(models: ModelSummary[], context: RenderContext = {
 
   return layout(
     "Model timelines",
-    `<section class="hero"><h1>Historic model timelines</h1><p class="muted">Choose a model to inspect score, quality, and cost across all successful hourly snapshots.</p></section>
+    `<section class="hero"><h1>Historic model timelines</h1><p class="muted">Choose a model to inspect score, quality, Cost per Task, and Time per Task across successful hourly snapshots.</p></section>
     <div class="table-wrap"><table>
       <thead><tr>${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Key", "Stable model key used to join results across snapshots.")}${thTip("Samples", "Number of successful snapshots containing this model.", "num")}${thTip("Latest sample", "Most recent successful snapshot containing this model.")}</tr></thead>
       <tbody>${rows || `<tr><td colspan="4" class="empty">No model results yet.</td></tr>`}</tbody>
@@ -300,10 +303,17 @@ export function renderModelTimeline(
   });
   const costChart = renderMetricChart({
     rows: timeline,
-    title: "Cost over time",
-    value: (row) => row.totalCost,
+    title: "Cost per task over time",
+    value: (row) => row.costForScoring,
     tone: "cost",
-    format: formatMoney,
+    format: formatTaskCost,
+  });
+  const timeChart = renderMetricChart({
+    rows: timeline,
+    title: "Time per task over time",
+    value: (row) => row.timePerTask,
+    tone: "time",
+    format: formatTaskTime,
   });
 
   const tableRows = timeline
@@ -315,7 +325,8 @@ export function renderModelTimeline(
         <td>${formatDateTime(row.runCompletedAt ?? row.runStartedAt)}</td>
         <td class="num">${fmt(row.calculated, options.calc === "div" ? 4 : 1)}</td>
         <td class="num">${fmt(row.quality, 1)}</td>
-        <td class="num">${formatMoney(row.totalCost)}</td>
+        <td class="num">${formatTaskCost(row.costForScoring)}</td>
+        <td class="num">${formatTaskTime(row.timePerTask)}</td>
         <td class="num">${fmt(row.intelligence, 1)}</td>
         <td class="num">${fmt(row.coding, 1)}</td>
         <td class="num">${fmt(row.agentic, 1)}</td>
@@ -331,10 +342,10 @@ export function renderModelTimeline(
       <p class="muted"><code>${escapeHtml(modelKey)}</code> · ${timeline.length} samples · ${escapeHtml(options.mode)} / ${escapeHtml(options.calc)}</p>
       ${renderTimelineForm(options)}
     </section>
-    <section class="charts">${scoreChart}${costChart}</section>
+    <section class="charts">${scoreChart}${costChart}${timeChart}</section>
     <div class="table-wrap"><table>
-      <thead><tr>${thTip("Run", "Fetch execution id for this sample.")}${thTip("Fetched", "When this sample was fetched.")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}${thTip("Quality", "Selected quality metric before cost adjustment.", "num")}${thTip("Cost", "AA intelligence-index benchmark cost in dollars.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("MMMU%", "MMMU Pro score as a percentage when available.", "num")}</tr></thead>
-      <tbody>${tableRows || `<tr><td colspan="9" class="empty">No timeline samples for this model.</td></tr>`}</tbody>
+      <thead><tr>${thTip("Run", "Fetch execution id for this sample.")}${thTip("Fetched", "When this sample was fetched.")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}${thTip("Quality", "Selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "AA weighted average Cost per Task in dollars. Falls back to legacy benchmark cost for older snapshots.", "num")}${thTip("Time/task", "AA weighted average Time per Task.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("MMMU%", "MMMU Pro score as a percentage when available.", "num")}</tr></thead>
+      <tbody>${tableRows || `<tr><td colspan="10" class="empty">No timeline samples for this model.</td></tr>`}</tbody>
     </table></div>`,
     context,
   );
@@ -353,36 +364,34 @@ export function renderErrorPage(
 }
 
 // ---------------------------------------------------------------------------
-// Cost vs quality scatter
+// Pareto-axis vs quality scatter
 // ---------------------------------------------------------------------------
 
 function renderCostQualityScatter(rows: ScoredRow[], options: ScoreOptions): string {
   const params = scoreOptionsToSearchParams(options);
-  const plottable = rows.filter(
-    (row) =>
-      row.totalCost != null &&
-      Number.isFinite(row.totalCost) &&
-      row.totalCost > 0 &&
-      Number.isFinite(row.quality),
-  );
+  const axis = paretoAxis(options.frontierMetric);
+  const plottable = rows.filter((row) => {
+    const x = axis.value(row);
+    return x != null && Number.isFinite(x) && x > 0 && Number.isFinite(row.quality);
+  });
   if (plottable.length === 0) return "";
 
   const points: ScatterPoint[] = plottable.map((row) => ({
-    x: row.totalCost as number,
+    x: axis.value(row) as number,
     y: row.quality,
-    tip: `${row.name} · Cost: ${formatMoney(row.totalCost)} · Quality: ${fmt(row.quality, 1)}${row.frontier ? " · Pareto frontier" : ""}`,
+    tip: `${row.name} · Cost/task: ${formatTaskCost(row.costForScoring)} · Time/task: ${formatTaskTime(row.timePerTask)} · Quality: ${fmt(row.quality, 1)}${row.frontier ? " · Pareto frontier" : ""}`,
     href: `/models/${encodeURIComponent(row.modelKey)}?${params.toString()}`,
     label: row.frontier ? truncate(row.shortName ?? row.name, 18) : undefined,
     emphasized: row.frontier,
   }));
 
-  // The frontier staircase: best quality available at or below each cost.
+  // The frontier staircase: best quality available at or below each cost/time.
   const frontier = plottable
     .filter((row) => row.frontier)
-    .sort((a, b) => (a.totalCost as number) - (b.totalCost as number));
+    .sort((a, b) => (axis.value(a) as number) - (axis.value(b) as number));
   const staircase: Array<{ x: number; y: number }> = [];
   for (const [index, row] of frontier.entries()) {
-    const x = row.totalCost as number;
+    const x = axis.value(row) as number;
     if (index > 0) staircase.push({ x, y: frontier[index - 1].quality });
     staircase.push({ x, y: row.quality });
   }
@@ -393,25 +402,49 @@ function renderCostQualityScatter(rows: ScoredRow[], options: ScoreOptions): str
     width: 960,
     height: 430,
     pad: 58,
-    ariaLabel: "Benchmark cost versus quality scatter with Pareto frontier",
+    ariaLabel: `${axis.label} versus quality scatter with Pareto frontier`,
     lineClass: "scatter-frontier-line",
     dotClass: "chart-entry scatter-dot",
     emphasizedDotClass: "scatter-dot-frontier",
     labelClass: "scatter-label",
-    xAxisLabel: "benchmark cost, log scale",
+    xAxisLabel: `${axis.axisLabel}, log scale`,
     yAxisLabel: `${options.mode} quality`,
-    xFormat: formatMoneyTick,
+    xFormat: axis.format,
     yFormat: (value) => fmt(value, 0),
   });
 
   return `<section class="scatter-panel">
-    <h2>${headingWithTip("Cost vs quality", HELP.scatter)}</h2>
-    <p class="muted">${plottable.length} models · ${frontier.length} on the Pareto frontier · <strong>${escapeHtml(options.mode)}</strong> quality vs benchmark cost</p>
+    <h2>${headingWithTip(`${axis.shortLabel} vs quality`, HELP.scatter)}</h2>
+    <p class="muted">${plottable.length} models · ${frontier.length} on the Pareto frontier · <strong>${escapeHtml(options.mode)}</strong> quality vs ${escapeHtml(axis.label)}</p>
     ${svg}
   </section>`;
 }
 
-/** Compact dollar labels for log-axis ticks: $0.20, $2, $50, $2k. */
+function paretoAxis(metric: FrontierMetric): {
+  value: (row: ScoredRow) => number | null;
+  label: string;
+  shortLabel: string;
+  axisLabel: string;
+  format: (value: number) => string;
+} {
+  return metric === "time"
+    ? {
+        value: (row) => row.timePerTask,
+        label: "Time per Task",
+        shortLabel: "Time/task",
+        axisLabel: "time per task",
+        format: formatTaskTime,
+      }
+    : {
+        value: (row) => row.costForScoring,
+        label: "Cost per Task",
+        shortLabel: "Cost/task",
+        axisLabel: "cost per task",
+        format: formatMoneyTick,
+      };
+}
+
+/** Compact dollar labels for log-axis ticks: $0.01, $0.10, $1, $10. */
 function formatMoneyTick(value: number): string {
   if (!Number.isFinite(value)) return "-";
   if (value >= 1000) {
@@ -419,7 +452,8 @@ function formatMoneyTick(value: number): string {
     return `$${(thousands >= 10 ? thousands.toFixed(0) : thousands.toFixed(1)).replace(/\.0$/, "")}k`;
   }
   if (value >= 1) return `$${value.toFixed(value >= 10 ? 0 : value % 1 === 0 ? 0 : 2)}`;
-  return `$${value.toFixed(2)}`;
+  if (value >= 0.1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(3).replace(/0$/, "")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +534,8 @@ function renderWinnerTimeline(
         <td>${link(`/models/${encodeURIComponent(row.modelKey)}?${scoreOptionsToSearchParams(options).toString()}`, row.name)}</td>
         <td class="num">${scoreFormat(row.calculated)}</td>
         <td class="num">${fmt(row.quality, 1)}</td>
-        <td class="num">${formatMoney(row.totalCost)}</td>
+        <td class="num">${formatTaskCost(row.costForScoring)}</td>
+        <td class="num">${formatTaskTime(row.timePerTask)}</td>
       </tr>`,
     )
     .join("");
@@ -524,7 +559,7 @@ function renderWinnerTimeline(
         <div class="winner-chips">${changeChips}</div>
       </div>
       <div class="table-wrap compact-table"><table>
-        <thead><tr>${thTip("Run", "Fetch execution id for this winner.")}${thTip("Fetched", "When this winning snapshot was fetched.")}${thTip("Winner", "Top-ranked model for that snapshot.")}${thTip("Score", "Winner's final calculated score.", "num")}${thTip("Qual", "Winner's selected quality metric before cost adjustment.", "num")}${thTip("Cost", "Winner's benchmark cost in dollars.", "num")}</tr></thead>
+        <thead><tr>${thTip("Run", "Fetch execution id for this winner.")}${thTip("Fetched", "When this winning snapshot was fetched.")}${thTip("Winner", "Top-ranked model for that snapshot.")}${thTip("Score", "Winner's final calculated score.", "num")}${thTip("Qual", "Winner's selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "Winner's Cost per Task in dollars.", "num")}${thTip("Time/task", "Winner's Time per Task.", "num")}</tr></thead>
         <tbody>${recentRows}</tbody>
       </table></div>
     </div>
@@ -545,8 +580,9 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
         <td class="center">${row.frontier ? '<span title="Pareto frontier">✓</span>' : ""}</td>
         <td>${link(timelineUrl, row.name)}<br><small>${escapeHtml(row.creatorName ?? "")}</small></td>
         <td>${escapeHtml(row.releaseDate ?? "-")}</td>
-        <td class="num">${formatMoney(row.totalCost)}</td>
-        <td class="num">${fmt(row.costPerQuality, 2)}</td>
+        <td class="num">${formatTaskCost(row.costForScoring)}</td>
+        <td class="num">${formatTaskTime(row.timePerTask)}</td>
+        <td class="num">${fmt(row.costPerQuality, 4)}</td>
         <td class="num">${fmt(row.quality, 1)}</td>
         <td class="num">${fmtDelta(row.deltaTop)}</td>
         <td class="num">${fmt(row.intelligence, 1)}</td>
@@ -565,6 +601,7 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
       <col class="model-col">
       <col class="released-col">
       <col class="cost-col">
+      <col class="time-col">
       <col class="cost-quality-col">
       <col class="quality-col">
       <col class="delta-col">
@@ -574,8 +611,8 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
       <col class="penalty-col">
       <col class="score-col">
     </colgroup>
-    <thead><tr>${thTip("#", "Rank after applying the selected sort.", "num")}${thTip("Pareto", "On the Pareto frontier: no cheaper model has a higher selected quality score.", "center")}${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Released", "Model release date reported by Artificial Analysis.")}${thTip("Cost$", "AA intelligence-index benchmark cost in dollars. Lower is cheaper.", "num")}${thTip("$/Q", "Dollars per selected quality point. Lower is better.", "num")}${thTip("Qual", "Selected quality metric before cost adjustment.", "num")}${thTip("ΔTop", "Quality gap versus the top-quality model in this run.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("Pen", "Cost penalty subtracted in sub scoring. Zero for raw/div scoring display still shows the computed penalty.", "num")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}</tr></thead>
-    <tbody>${tableRows || `<tr><td colspan="13" class="empty">No scored rows for these options.</td></tr>`}</tbody>
+    <thead><tr>${thTip("#", "Rank after applying the selected sort.", "num")}${thTip("Pareto", "On the selected Pareto frontier: no lower-cost or faster model has a higher selected quality score.", "center")}${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Released", "Model release date reported by Artificial Analysis.")}${thTip("Cost/task", "AA weighted average Cost per Intelligence Index task in dollars. Lower is cheaper; legacy snapshots fall back to total benchmark cost.", "num")}${thTip("Time/task", "AA weighted average Time per Intelligence Index task. Lower is faster.", "num")}${thTip("$/Q", "Cost per selected quality point. Lower is better.", "num")}${thTip("Qual", "Selected quality metric before cost adjustment.", "num")}${thTip("ΔTop", "Quality gap versus the top-quality model in this run.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("Pen", "Cost penalty subtracted in sub scoring. Zero for raw/div scoring display still shows the computed penalty.", "num")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}</tr></thead>
+    <tbody>${tableRows || `<tr><td colspan="14" class="empty">No scored rows for these options.</td></tr>`}</tbody>
   </table></div>`;
 }
 
@@ -587,7 +624,7 @@ function renderMetricChart(input: {
   rows: Array<ScoredRow<TimelineResult>>;
   title: string;
   value: (row: ScoredRow<TimelineResult>) => number | null;
-  tone: "score" | "cost";
+  tone: "score" | "cost" | "time";
   format?: (value: number | null) => string;
   roundDigits?: number;
 }): string {
@@ -662,11 +699,11 @@ function renderScoreForm(
       "Choose the quality benchmark and final score formula.",
       `${selectControl("mode", "Mode", MODES, options.mode, HELP.mode)}${selectControl("calc", "Calc", CALCS, options.calc, HELP.calc)}`,
     )}
-    ${controlGroup("Cost adjustment", "Tune formulas that account for benchmark cost.", costControls(options))}
+    ${controlGroup("Cost adjustment", "Tune formulas that account for Cost per Task.", costControls(options))}
     ${controlGroup(
       "Result set",
       "Control table filtering, ordering, and row count.",
-      `${selectControl("sort", "Sort", SORT_KEYS, options.sort, HELP.sort)}${frontierFilterControl(options)}${limitControl(options)}`,
+      `${selectControl("sort", "Sort", SORT_KEYS, options.sort, HELP.sort)}${frontierFilterControl(options)}${frontierMetricControl(options)}${limitControl(options)}`,
     )}
     <div class="controls-actions"><button type="submit">Update</button></div>
   </form>`;
@@ -679,7 +716,7 @@ function renderTimelineForm(options: ScoreOptions): string {
       "Choose the quality benchmark and final score formula for this model.",
       `${selectControl("mode", "Mode", MODES, options.mode, HELP.mode)}${selectControl("calc", "Calc", CALCS, options.calc, HELP.calc)}`,
     )}
-    ${controlGroup("Cost adjustment", "Tune formulas that account for benchmark cost.", costControls(options))}
+    ${controlGroup("Cost adjustment", "Tune formulas that account for Cost per Task.", costControls(options))}
     <div class="controls-actions"><button type="submit">Update</button></div>
   </form>`;
 }
@@ -709,6 +746,16 @@ function frontierFilterControl(options: ScoreOptions): string {
       <option value="1" ${options.frontierOnly ? "selected" : ""}>Frontier only</option>
     </select>
   </label>`;
+}
+
+function frontierMetricControl(options: ScoreOptions): string {
+  return selectControl(
+    "frontierMetric",
+    "Pareto axis",
+    FRONTIER_METRICS,
+    options.frontierMetric,
+    HELP.frontierMetric,
+  );
 }
 
 function selectControl<T extends readonly string[]>(

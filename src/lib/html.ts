@@ -33,6 +33,28 @@ export function formatMoney(value: number | null | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
+/** USD per task needs more precision than whole-benchmark dollar totals. */
+export function formatTaskCost(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "-";
+  if (value >= 1000) return `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  if (value >= 100) return `$${value.toFixed(0)}`;
+  if (value >= 10) return `$${value.toFixed(1)}`;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.1) return `$${value.toFixed(3)}`;
+  if (value >= 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(5)}`;
+}
+
+/** Seconds rendered in compact task-duration units. */
+export function formatTaskTime(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "-";
+  if (value < 60) return `${value.toFixed(value >= 10 ? 0 : 1)}s`;
+  const minutes = value / 60;
+  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}m`;
+  const hours = minutes / 60;
+  return `${hours.toFixed(hours >= 10 ? 1 : 2)}h`;
+}
+
 export function formatBytes(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "-";
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;

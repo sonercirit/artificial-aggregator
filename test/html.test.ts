@@ -5,6 +5,8 @@ import {
   formatBytes,
   formatDateTime,
   formatMoney,
+  formatTaskCost,
+  formatTaskTime,
   roundForDisplay,
   truncate,
 } from "../src/lib/html";
@@ -53,6 +55,24 @@ describe("formatMoney", () => {
   it("uses locale grouping above $1000", () => {
     const expected = `$${(1234.5).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
     expect(formatMoney(1234.5)).toBe(expected);
+  });
+});
+
+describe("formatTaskCost", () => {
+  it("keeps sub-dollar task costs precise", () => {
+    expect(formatTaskCost(0.017842)).toBe("$0.0178");
+    expect(formatTaskCost(0.5)).toBe("$0.500");
+    expect(formatTaskCost(12.34)).toBe("$12.3");
+    expect(formatTaskCost(null)).toBe("-");
+  });
+});
+
+describe("formatTaskTime", () => {
+  it("renders seconds in compact task-duration units", () => {
+    expect(formatTaskTime(45)).toBe("45s");
+    expect(formatTaskTime(86.329)).toBe("1.44m");
+    expect(formatTaskTime(7200)).toBe("2.00h");
+    expect(formatTaskTime(null)).toBe("-");
   });
 });
 

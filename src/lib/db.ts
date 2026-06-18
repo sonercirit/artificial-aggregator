@@ -47,6 +47,12 @@ export type ModelResultRow = {
   output_cost: number | null;
   reasoning_cost: number | null;
   answer_cost: number | null;
+  cost_per_task: number | null;
+  input_cost_per_task: number | null;
+  output_cost_per_task: number | null;
+  reasoning_cost_per_task: number | null;
+  answer_cost_per_task: number | null;
+  time_per_task: number | null;
   intelligence: number | null;
   coding: number | null;
   agentic: number | null;
@@ -80,7 +86,7 @@ export type TimelineRun = {
 };
 
 /** SQL mirror of isScoreable() in aa.ts; expects model_results aliased as mr. */
-const SCOREABLE_SQL = `mr.total_cost > 0
+const SCOREABLE_SQL = `COALESCE(mr.cost_per_task, mr.total_cost) > 0
            AND mr.intelligence IS NOT NULL
            AND mr.coding IS NOT NULL`;
 
@@ -341,12 +347,15 @@ export async function storeModelResults(
         run_id, model_key, source_id, slug, name, short_name,
         creator_name, creator_slug, release_date, knowledge_cutoff_date,
         total_cost, input_cost, output_cost, reasoning_cost, answer_cost,
+        cost_per_task, input_cost_per_task, output_cost_per_task,
+        reasoning_cost_per_task, answer_cost_per_task, time_per_task,
         intelligence, coding, agentic, mmmu, price_input_1m, price_output_1m,
         active_params, is_open_weights, is_reasoning, raw_result_json
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?
       )
       ON CONFLICT(run_id, model_key) DO UPDATE SET
         source_id = excluded.source_id,
@@ -362,6 +371,12 @@ export async function storeModelResults(
         output_cost = excluded.output_cost,
         reasoning_cost = excluded.reasoning_cost,
         answer_cost = excluded.answer_cost,
+        cost_per_task = excluded.cost_per_task,
+        input_cost_per_task = excluded.input_cost_per_task,
+        output_cost_per_task = excluded.output_cost_per_task,
+        reasoning_cost_per_task = excluded.reasoning_cost_per_task,
+        answer_cost_per_task = excluded.answer_cost_per_task,
+        time_per_task = excluded.time_per_task,
         intelligence = excluded.intelligence,
         coding = excluded.coding,
         agentic = excluded.agentic,
@@ -388,6 +403,12 @@ export async function storeModelResults(
       result.outputCost,
       result.reasoningCost,
       result.answerCost,
+      result.costPerTask,
+      result.inputCostPerTask,
+      result.outputCostPerTask,
+      result.reasoningCostPerTask,
+      result.answerCostPerTask,
+      result.timePerTask,
       result.intelligence,
       result.coding,
       result.agentic,
@@ -629,6 +650,8 @@ export async function getTimelineResultsForRuns(
         mr.creator_name,
         mr.release_date,
         mr.total_cost,
+        mr.cost_per_task,
+        mr.time_per_task,
         mr.intelligence,
         mr.coding,
         mr.agentic,
@@ -666,6 +689,8 @@ type ScoreModelResultRow = {
   creator_name: string | null;
   release_date: string | null;
   total_cost: number | null;
+  cost_per_task: number | null;
+  time_per_task: number | null;
   intelligence: number | null;
   coding: number | null;
   agentic: number | null;
@@ -688,6 +713,12 @@ function rowToModelResult(row: ModelResultRow): ParsedModelResult {
     outputCost: row.output_cost,
     reasoningCost: row.reasoning_cost,
     answerCost: row.answer_cost,
+    costPerTask: row.cost_per_task,
+    inputCostPerTask: row.input_cost_per_task,
+    outputCostPerTask: row.output_cost_per_task,
+    reasoningCostPerTask: row.reasoning_cost_per_task,
+    answerCostPerTask: row.answer_cost_per_task,
+    timePerTask: row.time_per_task,
     intelligence: row.intelligence,
     coding: row.coding,
     agentic: row.agentic,
@@ -727,6 +758,12 @@ function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): T
     outputCost: null,
     reasoningCost: null,
     answerCost: null,
+    costPerTask: row.cost_per_task,
+    inputCostPerTask: null,
+    outputCostPerTask: null,
+    reasoningCostPerTask: null,
+    answerCostPerTask: null,
+    timePerTask: row.time_per_task,
     intelligence: row.intelligence,
     coding: row.coding,
     agentic: row.agentic,

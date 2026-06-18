@@ -787,13 +787,14 @@ tr.frontier td:first-child {
 .score-table .quality-col,
 .score-table .delta-col,
 .score-table .score-col {
-  width: 6.5%;
+  width: 6.2%;
 }
-.score-table .cost-col {
-  width: 7%;
+.score-table .cost-col,
+.score-table .time-col {
+  width: 6.8%;
 }
 .score-table .metric-col {
-  width: 6%;
+  width: 5.8%;
 }
 .score-table .penalty-col {
   width: 5.5%;
@@ -878,7 +879,7 @@ tr.frontier td:first-child {
   font-size: 0.85rem;
 }
 .compact-table table {
-  min-width: 620px;
+  min-width: 760px;
 }
 
 /* ==========================================================================
@@ -963,8 +964,15 @@ svg text {
 .chart-entry-cost {
   fill: var(--chart-cost);
 }
+.chart-line-time {
+  stroke: var(--warn);
+}
+.chart-dots-time,
+.chart-entry-time {
+  fill: var(--warn);
+}
 
-/* Cost vs quality scatter */
+/* Cost/task vs quality scatter */
 .scatter-panel {
   background: var(--panel);
   border: 1px solid var(--line);

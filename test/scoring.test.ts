@@ -24,6 +24,12 @@ function model(overrides: Partial<ParsedModelResult> = {}): ParsedModelResult {
     outputCost: null,
     reasoningCost: null,
     answerCost: null,
+    costPerTask: null,
+    inputCostPerTask: null,
+    outputCostPerTask: null,
+    reasoningCostPerTask: null,
+    answerCostPerTask: null,
+    timePerTask: null,
     intelligence: 50,
     coding: 50,
     agentic: null,
@@ -46,7 +52,7 @@ describe("parseScoreOptions", () => {
   it("parses explicit values, including alias keys", () => {
     const options = parseScoreOptions(
       new URLSearchParams(
-        "mode=coding&calc=div&sort=cost&pareto=only&cost-weight=5&costFloor=0.5&costPower=0.5&limit=25",
+        "mode=coding&calc=div&sort=cost&pareto=only&pareto-by=time&cost-weight=5&costFloor=0.5&costPower=0.5&limit=25",
       ),
     );
 
@@ -55,6 +61,7 @@ describe("parseScoreOptions", () => {
       calc: "div",
       sort: "cost",
       frontierOnly: true,
+      frontierMetric: "time",
       costWeight: 5,
       costFloor: 0.5,
       costPower: 0.5,
@@ -70,6 +77,7 @@ describe("parseScoreOptions", () => {
     expect(options.mode).toBe(DEFAULT_SCORE_OPTIONS.mode);
     expect(options.calc).toBe(DEFAULT_SCORE_OPTIONS.calc);
     expect(options.sort).toBe(DEFAULT_SCORE_OPTIONS.sort);
+    expect(options.frontierMetric).toBe(DEFAULT_SCORE_OPTIONS.frontierMetric);
     expect(options.costFloor).toBe(0.000001);
   });
 
@@ -83,7 +91,9 @@ describe("parseScoreOptions", () => {
 
   it("round-trips through scoreOptionsToSearchParams", () => {
     const options = parseScoreOptions(
-      new URLSearchParams("mode=agentic&calc=sub&sort=value&frontier=1&costWeight=7.5&limit=42"),
+      new URLSearchParams(
+        "mode=agentic&calc=sub&sort=value&frontier=1&frontierMetric=time&costWeight=7.5&limit=42",
+      ),
     );
 
     expect(parseScoreOptions(scoreOptionsToSearchParams(options))).toEqual(options);
@@ -123,10 +133,10 @@ describe("scoreRows", () => {
     const raw = scoreRows(rows, { ...options, calc: "raw" }).rows[0];
     expect(raw.calculated).toBe(50);
 
-    // costWeight 10, floor 1: penalty = 10 * log10(100) = 20.
+    // costWeight 10, floor 0.01: penalty = 10 * log10(100 / 0.01) = 40.
     const sub = scoreRows(rows, { ...options, calc: "sub" }).rows[0];
-    expect(sub.costPenalty).toBeCloseTo(20);
-    expect(sub.calculated).toBeCloseTo(30);
+    expect(sub.costPenalty).toBeCloseTo(40);
+    expect(sub.calculated).toBeCloseTo(10);
 
     const div = scoreRows(rows, { ...options, calc: "div", costPower: 0.5 }).rows[0];
     expect(div.calculated).toBeCloseTo(50 / Math.sqrt(100));
@@ -144,9 +154,23 @@ describe("scoreRows", () => {
     expect(result.topQualityModel?.modelKey).toBe("top");
     const mid = result.rows.find((row) => row.modelKey === "mid");
     expect(mid?.deltaTop).toBe(-20);
+    expect(mid?.costForScoring).toBe(50);
     expect(mid?.costVsTop).toBeCloseTo(0.25);
     expect(mid?.pointsPerK).toBeCloseTo((50 * 1000) / 50);
     expect(mid?.costPerQuality).toBeCloseTo(1);
+  });
+
+  it("prefers Cost per Task over legacy total cost", () => {
+    const result = scoreRows(
+      [
+        model({ modelKey: "legacy-expensive", totalCost: 1, costPerTask: 0.5 }),
+        model({ modelKey: "legacy-cheap", totalCost: 0.1, costPerTask: 2 }),
+      ],
+      { ...options, sort: "cost" },
+    );
+
+    expect(result.rows.map((row) => row.modelKey)).toEqual(["legacy-expensive", "legacy-cheap"]);
+    expect(result.rows[0].costForScoring).toBe(0.5);
   });
 
   it("excludes rows that are not scoreable or lack the selected metric", () => {
@@ -201,12 +225,40 @@ describe("scoreRows", () => {
     expect(result.topQualityModel?.modelKey).toBe("cheap");
   });
 
-  it("sorts ascending for cost and name, descending for quality and released", () => {
+  it("can compute the Pareto frontier by Time per Task", () => {
+    const result = scoreRows(
+      [
+        model({ modelKey: "fastest", intelligence: 40, coding: 40, totalCost: 10, timePerTask: 5 }),
+        model({ modelKey: "fast", intelligence: 60, coding: 60, totalCost: 20, timePerTask: 10 }),
+        model({
+          modelKey: "dominated",
+          intelligence: 50,
+          coding: 50,
+          totalCost: 1,
+          timePerTask: 50,
+        }),
+        model({
+          modelKey: "slow-best",
+          intelligence: 70,
+          coding: 70,
+          totalCost: 2,
+          timePerTask: 100,
+        }),
+        model({ modelKey: "missing-time", intelligence: 80, coding: 80, totalCost: 3 }),
+      ],
+      { ...options, frontierMetric: "time", frontierOnly: true, sort: "time" },
+    );
+
+    expect(result.rows.map((row) => row.modelKey)).toEqual(["fastest", "fast", "slow-best"]);
+  });
+
+  it("sorts ascending for cost, time, and name, descending for quality and released", () => {
     const rows = [
       model({
         modelKey: "b",
         name: "Bravo",
         totalCost: 5,
+        timePerTask: 30,
         intelligence: 30,
         coding: 30,
         releaseDate: "2025-01-01",
@@ -215,6 +267,7 @@ describe("scoreRows", () => {
         modelKey: "a",
         name: "Alpha",
         totalCost: 50,
+        timePerTask: 10,
         intelligence: 70,
         coding: 70,
         releaseDate: "2026-01-01",
@@ -223,6 +276,7 @@ describe("scoreRows", () => {
         modelKey: "c",
         name: "Charlie",
         totalCost: 1,
+        timePerTask: 20,
         intelligence: 50,
         coding: 50,
         releaseDate: null,
@@ -234,6 +288,9 @@ describe("scoreRows", () => {
 
     const byName = scoreRows(rows, { ...options, sort: "name" }).rows.map((row) => row.modelKey);
     expect(byName).toEqual(["a", "b", "c"]);
+
+    const byTime = scoreRows(rows, { ...options, sort: "time" }).rows.map((row) => row.modelKey);
+    expect(byTime).toEqual(["a", "c", "b"]);
 
     const byQuality = scoreRows(rows, { ...options, sort: "quality" }).rows.map(
       (row) => row.modelKey,

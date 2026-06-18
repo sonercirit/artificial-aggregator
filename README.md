@@ -2,7 +2,7 @@
 
 Live at https://artificialaggregator.com/.
 
-Cloudflare Worker web app for comparing Artificial Analysis model scores against benchmark costs.
+Cloudflare Worker web app for comparing Artificial Analysis model scores against Cost per Task and Time per Task.
 
 - **Hono** handles the web/API routes.
 - **Cloudflare D1 (SQLite)** stores hourly runs, normalized model results, and compressed raw HTML chunks.
@@ -59,7 +59,7 @@ The cron in `wrangler.toml` runs at minute `0` every hour.
 
 ## Useful routes
 
-- `/` latest comparison table with mode/cost scoring controls, a log-scale cost-vs-quality scatter with the Pareto frontier staircase, Pareto-frontier filter, tooltips, and 20 persisted UI themes
+- `/` latest comparison table with mode/cost scoring controls, Cost per Task and Time per Task columns, a log-scale Pareto-axis-vs-quality scatter with a cost/time Pareto frontier staircase, Pareto-frontier filter, tooltips, and 20 persisted UI themes
 - `/runs` all fetch executions
 - `/runs/:id` one execution
 - `/runs/:id/raw` exact raw HTML for that execution (decompressed from D1 chunks)

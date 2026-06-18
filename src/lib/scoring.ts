@@ -4,7 +4,7 @@
  */
 
 import type { ParsedModelResult } from "./aa";
-import { isScoreable } from "./aa";
+import { costForRanking, isScoreable } from "./aa";
 
 export const MODES = ["combined", "coding", "intelligence", "agentic", "mmmu"] as const;
 export type Mode = (typeof MODES)[number];
@@ -12,12 +12,16 @@ export type Mode = (typeof MODES)[number];
 export const CALCS = ["raw", "sub", "div"] as const;
 export type Calc = (typeof CALCS)[number];
 
+export const FRONTIER_METRICS = ["cost", "time"] as const;
+export type FrontierMetric = (typeof FRONTIER_METRICS)[number];
+
 export const SORT_KEYS = [
   "score",
   "quality",
   "value",
   "cqp",
   "cost",
+  "time",
   "intel",
   "coding",
   "agentic",
@@ -35,6 +39,7 @@ export type ScoreOptions = {
   costPower: number;
   sort: SortKey;
   frontierOnly: boolean;
+  frontierMetric: FrontierMetric;
   limit: number;
 };
 
@@ -42,15 +47,17 @@ export const DEFAULT_SCORE_OPTIONS: ScoreOptions = {
   mode: "combined",
   calc: "raw",
   costWeight: 10,
-  costFloor: 1,
+  costFloor: 0.01,
   costPower: 1,
   sort: "score",
   frontierOnly: false,
+  frontierMetric: "cost",
   limit: 100,
 };
 
 export type ScoredRow<T extends ParsedModelResult = ParsedModelResult> = T & {
   quality: number;
+  costForScoring: number;
   costPenalty: number;
   pointsPerK: number;
   costPerQuality: number;
@@ -102,6 +109,19 @@ export function parseScoreOptions(params: URLSearchParams): ScoreOptions {
       ["frontier", "frontierOnly", "frontier-only", "pareto", "paretoOnly", "pareto-only"],
       DEFAULT_SCORE_OPTIONS.frontierOnly,
     ),
+    frontierMetric: enumParam(
+      params,
+      [
+        "frontierMetric",
+        "frontier-metric",
+        "paretoMetric",
+        "pareto-metric",
+        "paretoBy",
+        "pareto-by",
+      ],
+      FRONTIER_METRICS,
+      DEFAULT_SCORE_OPTIONS.frontierMetric,
+    ),
     limit: limitParam(params),
   };
 }
@@ -112,6 +132,7 @@ export function scoreOptionsToSearchParams(options: ScoreOptions): URLSearchPara
   params.set("calc", options.calc);
   params.set("sort", options.sort);
   params.set("frontier", options.frontierOnly ? "1" : "0");
+  params.set("frontierMetric", options.frontierMetric);
   params.set("costWeight", String(options.costWeight));
   params.set("costFloor", String(options.costFloor));
   params.set("costPower", String(options.costPower));
@@ -121,12 +142,18 @@ export function scoreOptionsToSearchParams(options: ScoreOptions): URLSearchPara
 
 function enumParam<const T extends readonly string[]>(
   params: URLSearchParams,
-  key: string,
+  keyOrKeys: string | string[],
   values: T,
   fallback: T[number],
 ): T[number] {
-  const value = params.get(key)?.toLowerCase();
-  return values.includes(value ?? "") ? (value as T[number]) : fallback;
+  const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+
+  for (const key of keys) {
+    const value = params.get(key)?.toLowerCase();
+    if (values.includes(value ?? "")) return value as T[number];
+  }
+
+  return fallback;
 }
 
 function numberParam(
@@ -206,7 +233,8 @@ export function qualityFor(result: ParsedModelResult, mode: Mode): number | null
 type ScoreableEntry<T extends ParsedModelResult> = {
   result: T;
   quality: number;
-  totalCost: number;
+  cost: number;
+  frontierValue: number | null;
 };
 
 export function scoreRows<T extends ParsedModelResult>(
@@ -214,12 +242,18 @@ export function scoreRows<T extends ParsedModelResult>(
   options: ScoreOptions,
 ): ScoreResult<T> {
   // Rows must have the selected quality metric and pass the scoreable
-  // predicate (positive cost, intelligence and coding present).
+  // predicate (positive Cost per Task/legacy cost, intelligence and coding present).
   const entries: Array<ScoreableEntry<T>> = [];
   for (const result of results) {
     const quality = qualityFor(result, options.mode);
     if (quality == null || !isScoreable(result)) continue;
-    entries.push({ result, quality, totalCost: result.totalCost as number });
+    const cost = costForRanking(result) as number;
+    entries.push({
+      result,
+      quality,
+      cost,
+      frontierValue: frontierValueFor(result, options.frontierMetric),
+    });
   }
 
   if (entries.length === 0) {
@@ -234,8 +268,8 @@ export function scoreRows<T extends ParsedModelResult>(
 
   const frontier = frontierFlags(entries);
 
-  const rows = entries.map(({ result, quality, totalCost }, index): ScoredRow<T> => {
-    const safeCost = Math.max(totalCost, options.costFloor);
+  const rows = entries.map(({ result, quality, cost }, index): ScoredRow<T> => {
+    const safeCost = Math.max(cost, options.costFloor);
     const costPenalty = options.costWeight * Math.log10(safeCost / options.costFloor);
     const calculated =
       options.calc === "raw"
@@ -247,11 +281,12 @@ export function scoreRows<T extends ParsedModelResult>(
     return {
       ...result,
       quality,
+      costForScoring: cost,
       costPenalty,
-      pointsPerK: (quality * 1000) / totalCost,
-      costPerQuality: totalCost / quality,
+      pointsPerK: (quality * 1000) / cost,
+      costPerQuality: cost / quality,
       deltaTop: quality - top.quality,
-      costVsTop: totalCost / top.totalCost,
+      costVsTop: cost / top.cost,
       calculated,
       frontier: frontier[index],
     };
@@ -265,21 +300,26 @@ export function scoreRows<T extends ParsedModelResult>(
 }
 
 /**
- * Pareto frontier: walking models from cheapest to priciest (quality breaks
- * cost ties), a model is on the frontier when no cheaper model matches or
- * beats its quality.
+ * Pareto frontier: walking models from lowest to highest selected frontier
+ * value (quality breaks ties), a model is on the frontier when no lower-cost
+ * or faster model matches or beats its quality.
  */
 function frontierFlags<T extends ParsedModelResult>(entries: Array<ScoreableEntry<T>>): boolean[] {
   const order = entries.map((_, index) => index);
-  order.sort(
-    (a, b) =>
-      entries[a].totalCost - entries[b].totalCost || entries[b].quality - entries[a].quality,
-  );
+  order.sort((a, b) => {
+    const av = entries[a].frontierValue;
+    const bv = entries[b].frontierValue;
+    if (av == null && bv == null) return entries[b].quality - entries[a].quality;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return av - bv || entries[b].quality - entries[a].quality;
+  });
 
   const flags = new Array<boolean>(entries.length).fill(false);
   let bestQualitySoFar = -Infinity;
   for (const index of order) {
-    const { quality } = entries[index];
+    const { frontierValue, quality } = entries[index];
+    if (frontierValue == null) continue;
     flags[index] = quality > bestQualitySoFar + 1e-9;
     if (quality > bestQualitySoFar) bestQualitySoFar = quality;
   }
@@ -287,7 +327,7 @@ function frontierFlags<T extends ParsedModelResult>(entries: Array<ScoreableEntr
   return flags;
 }
 
-const ASCENDING_SORTS = new Set<SortKey>(["cost", "cqp", "name"]);
+const ASCENDING_SORTS = new Set<SortKey>(["cost", "cqp", "time", "name"]);
 const STRING_SORTS = new Set<SortKey>(["released", "name"]);
 
 function sortRows<T extends ParsedModelResult>(
@@ -299,7 +339,8 @@ function sortRows<T extends ParsedModelResult>(
     quality: (row) => row.quality,
     value: (row) => row.pointsPerK,
     cqp: (row) => row.costPerQuality,
-    cost: (row) => row.totalCost,
+    cost: (row) => row.costForScoring,
+    time: (row) => row.timePerTask,
     intel: (row) => row.intelligence,
     coding: (row) => row.coding,
     agentic: (row) => row.agentic,
@@ -330,6 +371,11 @@ function sortRows<T extends ParsedModelResult>(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function frontierValueFor(result: ParsedModelResult, metric: FrontierMetric): number | null {
+  const value = metric === "cost" ? costForRanking(result) : numberOrNull(result.timePerTask);
+  return value != null && value > 0 ? value : null;
+}
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;

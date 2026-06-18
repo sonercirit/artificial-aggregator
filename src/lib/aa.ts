@@ -9,7 +9,7 @@
 export const ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/models";
 
 /** Stored with every run; bump when the extraction/normalization rules change. */
-export const PARSER_VERSION = "aa-next-rsc-default-data-v2";
+export const PARSER_VERSION = "aa-next-rsc-cost-time-per-task-v3";
 
 export type ParsedModelResult = {
   modelKey: string;
@@ -26,6 +26,13 @@ export type ParsedModelResult = {
   outputCost: number | null;
   reasoningCost: number | null;
   answerCost: number | null;
+  costPerTask: number | null;
+  inputCostPerTask: number | null;
+  outputCostPerTask: number | null;
+  reasoningCostPerTask: number | null;
+  answerCostPerTask: number | null;
+  /** Seconds per Intelligence Index task. */
+  timePerTask: number | null;
   intelligence: number | null;
   coding: number | null;
   agentic: number | null;
@@ -39,16 +46,21 @@ export type ParsedModelResult = {
 };
 
 /**
+ * Cost used by ranking and Pareto math: prefer AA's newer Cost per Task,
+ * falling back to the legacy whole-benchmark cost for older stored snapshots.
+ */
+export function costForRanking(result: ParsedModelResult): number | null {
+  return numberOrNull(result.costPerTask) ?? numberOrNull(result.totalCost);
+}
+
+/**
  * A result that can participate in score/cost ranking. The same predicate is
- * mirrored in SQL by db.ts (total_cost > 0, intelligence and coding present).
+ * mirrored in SQL by db.ts (COALESCE(cost_per_task, total_cost) > 0,
+ * intelligence and coding present).
  */
 export function isScoreable(result: ParsedModelResult): boolean {
-  return (
-    isNumber(result.totalCost) &&
-    result.totalCost > 0 &&
-    isNumber(result.intelligence) &&
-    isNumber(result.coding)
-  );
+  const cost = costForRanking(result);
+  return cost != null && cost > 0 && isNumber(result.intelligence) && isNumber(result.coding);
 }
 
 export function parseHtmlToResults(html: string): ParsedModelResult[] {
@@ -155,6 +167,11 @@ function isEscaped(value: string, quoteIndex: number): boolean {
 function hasModelScoreFields(input: unknown): boolean {
   const model = asRecord(input);
   const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
+  const taskCostSource = firstRecord(
+    model.intelligence_index_cost_per_task,
+    model.intelligenceIndexCostPerTask,
+  );
+  const taskCost = costComponentRecord(taskCostSource);
 
   return (
     numberOrNull(model.intelligence_index) != null ||
@@ -162,7 +179,12 @@ function hasModelScoreFields(input: unknown): boolean {
     numberOrNull(model.coding_index) != null ||
     numberOrNull(model.codingIndex) != null ||
     numberOrNull(cost.total_cost) != null ||
-    numberOrNull(cost.totalCost) != null
+    numberOrNull(cost.totalCost) != null ||
+    numberOrNull(taskCost.total) != null ||
+    numberOrNull(taskCost.total_cost) != null ||
+    numberOrNull(taskCost.totalCost) != null ||
+    numberOrNull(model.intelligence_index_cost_per_task) != null ||
+    numberOrNull(model.intelligenceIndexCostPerTask) != null
   );
 }
 
@@ -175,6 +197,11 @@ function hasModelScoreFields(input: unknown): boolean {
 function normalizeModel(input: unknown): ParsedModelResult {
   const model = asRecord(input);
   const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
+  const taskCostSource = firstRecord(
+    model.intelligence_index_cost_per_task,
+    model.intelligenceIndexCostPerTask,
+  );
+  const taskCost = costComponentRecord(taskCostSource);
   const creator = firstRecord(model.model_creators, model.creator);
   const sourceId = stringOrNull(model.id);
   const slug = stringOrNull(model.slug);
@@ -189,6 +216,31 @@ function normalizeModel(input: unknown): ParsedModelResult {
   const outputCost = numberOrNull(cost.output_cost) ?? numberOrNull(cost.outputCost);
   const reasoningCost = numberOrNull(cost.reasoning_cost) ?? numberOrNull(cost.reasoningCost);
   const answerCost = numberOrNull(cost.answer_cost) ?? numberOrNull(cost.answerCost);
+  const costPerTask =
+    numberOrNull(taskCost.total) ??
+    numberOrNull(taskCost.total_cost) ??
+    numberOrNull(taskCost.totalCost) ??
+    numberOrNull(model.intelligence_index_cost_per_task) ??
+    numberOrNull(model.intelligenceIndexCostPerTask);
+  const inputCostPerTask =
+    numberOrNull(taskCost.input) ??
+    numberOrNull(taskCost.input_cost) ??
+    numberOrNull(taskCost.inputCost);
+  const outputCostPerTask =
+    numberOrNull(taskCost.output) ??
+    numberOrNull(taskCost.output_cost) ??
+    numberOrNull(taskCost.outputCost);
+  const reasoningCostPerTask =
+    numberOrNull(taskCost.reasoning) ??
+    numberOrNull(taskCost.reasoning_cost) ??
+    numberOrNull(taskCost.reasoningCost);
+  const answerCostPerTask =
+    numberOrNull(taskCost.answer) ??
+    numberOrNull(taskCost.answer_cost) ??
+    numberOrNull(taskCost.answerCost);
+  const timePerTask =
+    numberOrNull(model.intelligence_index_time_per_task) ??
+    numberOrNull(model.intelligenceIndexTimePerTask);
   const intelligence =
     numberOrNull(model.intelligence_index) ?? numberOrNull(model.intelligenceIndex);
   const coding = numberOrNull(model.coding_index) ?? numberOrNull(model.codingIndex);
@@ -220,6 +272,8 @@ function normalizeModel(input: unknown): ParsedModelResult {
     agentic_index: agentic,
     mmmu_pro: mmmu,
     intelligence_index_cost: cost,
+    intelligence_index_cost_per_task: taskCostSource,
+    intelligence_index_time_per_task: timePerTask,
     price_1m_input_tokens: priceInput1m,
     price_1m_output_tokens: priceOutput1m,
     activeParams,
@@ -242,6 +296,12 @@ function normalizeModel(input: unknown): ParsedModelResult {
     outputCost,
     reasoningCost,
     answerCost,
+    costPerTask,
+    inputCostPerTask,
+    outputCostPerTask,
+    reasoningCostPerTask,
+    answerCostPerTask,
+    timePerTask,
     intelligence,
     coding,
     agentic,
@@ -266,6 +326,10 @@ function firstRecord(...values: unknown[]): Record<string, unknown> {
   }
 
   return {};
+}
+
+function costComponentRecord(source: Record<string, unknown>): Record<string, unknown> {
+  return firstRecord(source.cost, source.cost_per_task, source.costPerTask, source);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
