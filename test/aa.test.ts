@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { costForRanking, isScoreable, parseHtmlToResults } from "../src/lib/aa";
+import {
+  costForRanking,
+  decryptManifestPayload,
+  extractManifestsFromHtml,
+  isScoreable,
+  parseEmbeddedHtmlToResults,
+  parseHtmlToResults,
+} from "../src/lib/aa";
+
+/** Sync wrapper matching the pre-manifest API used by most unit tests. */
+function parseHtml(html: string) {
+  return parseEmbeddedHtmlToResults(html);
+}
 
 /**
  * Encode a JSON string the way Next.js flight payloads embed it in HTML:
@@ -69,7 +81,7 @@ describe("parseHtmlToResults", () => {
     const html = flightHtml(
       JSON.stringify({ requestId: "abc", defaultData: [FULL_MODEL, BUDGET_MODEL], tail: true }),
     );
-    const results = parseHtmlToResults(html);
+    const results = parseHtml(html);
 
     expect(results).toHaveLength(2);
     const gold = results[0];
@@ -134,7 +146,7 @@ describe("parseHtmlToResults", () => {
         ],
       }),
     );
-    const [camel] = parseHtmlToResults(html);
+    const [camel] = parseHtml(html);
 
     expect(camel.shortName).toBe("Cml");
     expect(camel.creatorName).toBe("Dromedary");
@@ -164,7 +176,7 @@ describe("parseHtmlToResults", () => {
     };
     // JSON.stringify keeps the sentinels as plain strings, matching the page.
     const html = flightHtml(JSON.stringify({ defaultData: [model] }));
-    const [budget] = parseHtmlToResults(html);
+    const [budget] = parseHtml(html);
 
     expect(budget.agentic).toBeNull();
     expect(budget.mmmu).toBeNull();
@@ -175,7 +187,7 @@ describe("parseHtmlToResults", () => {
 
   it("falls back to the models array when defaultData is absent", () => {
     const html = flightHtml(JSON.stringify({ models: [BUDGET_MODEL] }));
-    const results = parseHtmlToResults(html);
+    const results = parseHtml(html);
 
     expect(results).toHaveLength(1);
     expect(results[0].modelKey).toBe("budget-1");
@@ -188,7 +200,7 @@ describe("parseHtmlToResults", () => {
         models: [BUDGET_MODEL],
       }),
     );
-    const results = parseHtmlToResults(html);
+    const results = parseHtml(html);
 
     expect(results.map((result) => result.modelKey)).toEqual(["budget-1"]);
   });
@@ -197,7 +209,7 @@ describe("parseHtmlToResults", () => {
     const html = `<script type="application/json">${JSON.stringify({
       defaultData: [BUDGET_MODEL],
     })}</script>`;
-    const results = parseHtmlToResults(html);
+    const results = parseHtml(html);
 
     expect(results).toHaveLength(1);
     expect(results[0].totalCost).toBe(12.5);
@@ -213,7 +225,7 @@ describe("parseHtmlToResults", () => {
         ],
       }),
     );
-    const keys = parseHtmlToResults(html).map((result) => result.modelKey);
+    const keys = parseHtml(html).map((result) => result.modelKey);
 
     expect(keys).toEqual(["slug-a", "id-b", "hello-world-2-0"]);
   });
@@ -223,11 +235,11 @@ describe("parseHtmlToResults", () => {
       JSON.stringify({ defaultData: [BUDGET_MODEL, { intelligence_index: 10 }] }),
     );
 
-    expect(parseHtmlToResults(html)).toHaveLength(1);
+    expect(parseHtml(html)).toHaveLength(1);
   });
 
   it("throws when the HTML has no models payload at all", () => {
-    expect(() => parseHtmlToResults("<html><body>maintenance page</body></html>")).toThrow(
+    expect(() => parseHtml("<html><body>maintenance page</body></html>")).toThrow(
       /Could not find Artificial Analysis models payload/,
     );
   });
@@ -235,9 +247,227 @@ describe("parseHtmlToResults", () => {
   it("throws when models parse but none carry score/cost fields", () => {
     const html = flightHtml(JSON.stringify({ defaultData: [{ id: "x", slug: "x", name: "X" }] }));
 
-    expect(() => parseHtmlToResults(html)).toThrow(/did not include score\/cost fields/);
+    expect(() => parseHtml(html)).toThrow(/did not include score\/cost fields/);
+  });
+
+  it("extracts score-bearing initialModels when defaultData is absent", () => {
+    const html = flightHtml(
+      JSON.stringify({
+        initialModels: [
+          {
+            id: "init-id",
+            slug: "init-1",
+            name: "Init One",
+            intelligenceIndex: 41,
+            codingIndex: 38,
+            intelligenceIndexCost: { total: 12.5, input: 2, output: 10, reasoning: 1, answer: 1 },
+            intelligenceIndexCostPerTask: {
+              cost: {
+                total: 0.0125,
+                input: 0.002,
+                output: 0.01,
+                reasoning: 0.0005,
+                answer: 0.0005,
+              },
+            },
+            intelligenceIndexTimePerTask: 45,
+          },
+        ],
+      }),
+    );
+    const [budget] = parseHtml(html);
+
+    expect(budget.modelKey).toBe("init-1");
+    expect(budget.totalCost).toBe(12.5);
+    expect(budget.inputCost).toBe(2);
+    expect(budget.costPerTask).toBe(0.0125);
+    expect(budget.timePerTask).toBe(45);
+  });
+
+  it("prefers scoreable initialModels over a scoreless models index", () => {
+    const html = flightHtml(
+      JSON.stringify({
+        models: [{ id: "stub", slug: "stub", name: "Stub", isReasoning: true }],
+        initialModels: [BUDGET_MODEL],
+      }),
+    );
+    const results = parseHtml(html);
+
+    expect(results.map((result) => result.modelKey)).toEqual(["budget-1"]);
   });
 });
+
+describe("encrypted manifests", () => {
+  const MANIFEST_KEY = "e656395420364e21be7e52f6b3b6adb685471d4885084dbf75e2e5712956c4d1";
+
+  async function encryptManifest(payload: unknown, keyHex = MANIFEST_KEY): Promise<ArrayBuffer> {
+    const keyBytes = hexToBytes(keyHex);
+    const keyBuffer = toArrayBuffer(keyBytes);
+    const iv = new Uint8Array(await crypto.subtle.digest("SHA-256", keyBuffer)).slice(0, 12);
+    const cryptoKey = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-GCM" }, false, [
+      "encrypt",
+    ]);
+    const json = new TextEncoder().encode(JSON.stringify(payload));
+    const gzipped = await gzipBytes(json);
+    return crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, tagLength: 128 },
+      cryptoKey,
+      toArrayBuffer(gzipped),
+    );
+  }
+
+  it("extracts unique manifest path/key pairs from flight HTML", () => {
+    const html = flightHtml(
+      JSON.stringify({
+        children: [
+          {
+            manifest: {
+              path: "/data/models.txt",
+              key: MANIFEST_KEY,
+            },
+          },
+          {
+            // duplicate should be ignored
+            manifest: {
+              path: "/data/models.txt",
+              key: MANIFEST_KEY,
+            },
+          },
+          {
+            manifest: {
+              path: "/data/hosts.txt",
+              key: "448ac6a3fb7f389e3d98f578e9ddcab0f51a24e839ee5671de0645747367e9d9",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(extractManifestsFromHtml(html)).toEqual([
+      { path: "/data/models.txt", key: MANIFEST_KEY },
+      {
+        path: "/data/hosts.txt",
+        key: "448ac6a3fb7f389e3d98f578e9ddcab0f51a24e839ee5671de0645747367e9d9",
+      },
+    ]);
+  });
+
+  it("decrypts an AES-GCM + gzip manifest payload", async () => {
+    const payload = {
+      models: [
+        {
+          id: "m1",
+          slug: "manifest-1",
+          name: "Manifest One",
+          intelligenceIndex: 40,
+          codingIndex: 35,
+          intelligenceIndexCost: { total: 20 },
+          intelligenceIndexCostPerTask: { cost: { total: 0.02 } },
+          intelligenceIndexTimePerTask: 9,
+          price1mInputTokens: 1,
+          price1mOutputTokens: 2,
+          creator: { name: "Acme", slug: "acme" },
+        },
+      ],
+    };
+    const encrypted = await encryptManifest(payload);
+    const decrypted = await decryptManifestPayload(encrypted, MANIFEST_KEY);
+
+    expect(decrypted).toEqual(payload);
+  });
+
+  it("loads scoreable models from encrypted manifests when HTML only has a slim index", async () => {
+    const fullModels = {
+      models: [
+        {
+          id: "m1",
+          slug: "manifest-1",
+          name: "Manifest One",
+          shortName: "M1",
+          intelligenceIndex: 40,
+          codingIndex: 35,
+          agenticIndex: 20,
+          mmmuPro: 0.5,
+          intelligenceIndexCost: {
+            total: 20,
+            input: 5,
+            output: 15,
+            reasoning: 10,
+            answer: 5,
+          },
+          intelligenceIndexCostPerTask: {
+            cost: { total: 0.02, input: 0.005, output: 0.015, reasoning: 0.01, answer: 0.005 },
+          },
+          intelligenceIndexTimePerTask: 9.5,
+          price1mInputTokens: 1.1,
+          price1mOutputTokens: 2.2,
+          inferenceParametersActiveBillions: 7,
+          isOpenWeights: true,
+          isReasoning: true,
+          creator: { name: "Acme", slug: "acme" },
+          releaseDate: "2026-06-01",
+          knowledgeCutoffDate: "2026-01-01",
+        },
+      ],
+    };
+    const encrypted = await encryptManifest(fullModels);
+    const html = flightHtml(
+      JSON.stringify({
+        models: [{ id: "stub", slug: "stub", name: "Stub Index" }],
+        manifest: { path: "/data/models.txt", key: MANIFEST_KEY },
+      }),
+    );
+
+    const results = await parseHtmlToResults(html, {
+      resolveUrl: (path) => `https://example.test${path}`,
+      fetchBinary: async (url) => {
+        expect(url).toBe("https://example.test/data/models.txt");
+        return encrypted;
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    const model = results[0];
+    expect(model.modelKey).toBe("manifest-1");
+    expect(model.intelligence).toBe(40);
+    expect(model.coding).toBe(35);
+    expect(model.agentic).toBe(20);
+    expect(model.mmmu).toBe(0.5);
+    expect(model.totalCost).toBe(20);
+    expect(model.inputCost).toBe(5);
+    expect(model.outputCost).toBe(15);
+    expect(model.costPerTask).toBe(0.02);
+    expect(model.timePerTask).toBe(9.5);
+    expect(model.priceInput1m).toBe(1.1);
+    expect(model.priceOutput1m).toBe(2.2);
+    expect(model.activeParams).toBe(7);
+    expect(model.creatorName).toBe("Acme");
+    expect(model.isOpenWeights).toBe(true);
+    expect(model.isReasoning).toBe(true);
+  });
+});
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+async function gzipBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new Response(toArrayBuffer(bytes)).body?.pipeThrough(
+    new CompressionStream("gzip"),
+  );
+  if (!stream) throw new Error("CompressionStream unavailable");
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
 
 describe("isScoreable", () => {
   const base = {

@@ -1,15 +1,20 @@
 /**
  * Artificial Analysis snapshot parser.
  *
- * The source page is a Next.js RSC payload: the model list is embedded in the
- * HTML as an escaped JSON array. This module locates that array, decodes it,
- * and normalizes each entry into a stable, storage-ready shape.
+ * The source page is a Next.js RSC payload. Historically the full model list
+ * was embedded in the HTML as an escaped JSON array. Newer pages only embed a
+ * short `initialModels` preview and load the complete list from AES-GCM
+ * encrypted, gzip-compressed `/data/*.txt` manifests referenced in the HTML.
+ *
+ * This module locates every candidate payload (embedded arrays + manifests),
+ * decrypts manifests when a fetch helper is provided, and normalizes each
+ * entry into a stable, storage-ready shape.
  */
 
 export const ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/models";
 
 /** Stored with every run; bump when the extraction/normalization rules change. */
-export const PARSER_VERSION = "aa-next-rsc-cost-time-per-task-v3";
+export const PARSER_VERSION = "aa-next-rsc-manifest-aes-gcm-v4";
 
 export type ParsedModelResult = {
   modelKey: string;
@@ -45,6 +50,18 @@ export type ParsedModelResult = {
   rawResultJson: string;
 };
 
+export type ManifestRef = {
+  path: string;
+  key: string;
+};
+
+export type ParseHtmlOptions = {
+  /** Turn a relative manifest path into an absolute URL. Defaults to AA origin. */
+  resolveUrl?: (path: string) => string;
+  /** Fetch a binary manifest body. Required to load encrypted `/data/*.txt` payloads. */
+  fetchBinary?: (url: string) => Promise<ArrayBuffer>;
+};
+
 /**
  * Cost used by ranking and Pareto math: prefer AA's newer Cost per Task,
  * falling back to the legacy whole-benchmark cost for older stored snapshots.
@@ -63,33 +80,72 @@ export function isScoreable(result: ParsedModelResult): boolean {
   return cost != null && cost > 0 && isNumber(result.intelligence) && isNumber(result.coding);
 }
 
-export function parseHtmlToResults(html: string): ParsedModelResult[] {
-  const results = extractModelsFromHtml(html)
-    .map(normalizeModel)
-    .filter((model) => model.modelKey.length > 0 && model.name.length > 0);
+/**
+ * Parse model results from a models-page HTML snapshot.
+ *
+ * When `fetchBinary` is provided, encrypted `/data/*.txt` manifests referenced
+ * by the page are also loaded; the candidate with the most scoreable models
+ * wins (full manifest lists beat the short embedded preview).
+ */
+export async function parseHtmlToResults(
+  html: string,
+  options: ParseHtmlOptions = {},
+): Promise<ParsedModelResult[]> {
+  const candidates: unknown[][] = extractEmbeddedModelArrays(html);
 
-  if (results.length > 0 && !results.some(isScoreable)) {
+  if (options.fetchBinary) {
+    const manifests = extractManifestsFromHtml(html);
+    for (const manifest of manifests) {
+      try {
+        const models = await loadManifestModels(manifest, options);
+        if (models.length > 0) candidates.push(models);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`Could not load Artificial Analysis manifest ${manifest.path}: ${message}`);
+      }
+    }
+  }
+
+  const best = pickBestNormalized(candidates);
+  if (!best) {
+    throw new Error("Could not find Artificial Analysis models payload in HTML");
+  }
+
+  if (best.length > 0 && !best.some(isScoreable)) {
     throw new Error("Parsed Artificial Analysis payload did not include score/cost fields");
   }
 
-  return results;
+  return best;
+}
+
+/** Synchronous HTML-only parse used by unit tests and older snapshots. */
+export function parseEmbeddedHtmlToResults(html: string): ParsedModelResult[] {
+  const best = pickBestNormalized(extractEmbeddedModelArrays(html));
+  if (!best) {
+    throw new Error("Could not find Artificial Analysis models payload in HTML");
+  }
+
+  if (best.length > 0 && !best.some(isScoreable)) {
+    throw new Error("Parsed Artificial Analysis payload did not include score/cost fields");
+  }
+
+  return best;
 }
 
 // ---------------------------------------------------------------------------
 // Payload extraction
 // ---------------------------------------------------------------------------
 
-function extractModelsFromHtml(html: string): unknown[] {
-  // Prefer "defaultData" when it actually carries scores; older payloads used
-  // a "models" array instead.
-  const defaultData = extractArrayFromHtmlPayload(html, "defaultData");
-  if (defaultData && defaultData.some(hasModelScoreFields)) return defaultData;
+function extractEmbeddedModelArrays(html: string): unknown[][] {
+  const candidates: unknown[][] = [];
 
-  const models = extractArrayFromHtmlPayload(html, "models");
-  if (models) return models;
-  if (defaultData) return defaultData;
+  // Prefer score-bearing keys first; `models` is often a slim id/slug index.
+  for (const keyName of ["defaultData", "initialModels", "models"]) {
+    const array = extractArrayFromHtmlPayload(html, keyName);
+    if (array) candidates.push(array);
+  }
 
-  throw new Error("Could not find Artificial Analysis models payload in HTML");
+  return candidates;
 }
 
 function extractArrayFromHtmlPayload(html: string, keyName: string): unknown[] | null {
@@ -164,6 +220,136 @@ function isEscaped(value: string, quoteIndex: number): boolean {
   return backslashes % 2 === 1;
 }
 
+/**
+ * Locate encrypted data manifests embedded in the RSC flight payload.
+ *
+ * Shape: `"manifest":{"path":"/data/<id>.txt","key":"<64 hex chars>"}`
+ */
+export function extractManifestsFromHtml(html: string): ManifestRef[] {
+  const clean = html.replaceAll('\\"', '"').replaceAll("\\\\", "\\");
+  const pattern =
+    /"manifest"\s*:\s*\{\s*"path"\s*:\s*"(\/data\/[^"]+)"\s*,\s*"key"\s*:\s*"([0-9a-fA-F]{64})"/g;
+  const seen = new Set<string>();
+  const manifests: ManifestRef[] = [];
+
+  for (const match of clean.matchAll(pattern)) {
+    const path = match[1];
+    const key = match[2].toLowerCase();
+    const id = `${path}:${key}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    manifests.push({ path, key });
+  }
+
+  return manifests;
+}
+
+async function loadManifestModels(
+  manifest: ManifestRef,
+  options: ParseHtmlOptions,
+): Promise<unknown[]> {
+  if (!options.fetchBinary) {
+    throw new Error("fetchBinary is required to load manifests");
+  }
+
+  const resolveUrl =
+    options.resolveUrl ?? ((path: string) => new URL(path, ARTIFICIAL_ANALYSIS_URL).toString());
+  const url = resolveUrl(manifest.path);
+  const encrypted = await options.fetchBinary(url);
+  const payload = await decryptManifestPayload(encrypted, manifest.key);
+  return modelsFromManifestPayload(payload);
+}
+
+/**
+ * Decrypt an AA `/data/*.txt` body: AES-256-GCM with the hex key, IV =
+ * SHA-256(key)[0..12], ciphertext||tag, then gzip.
+ */
+export async function decryptManifestPayload(
+  encrypted: ArrayBuffer,
+  keyHex: string,
+): Promise<unknown> {
+  const keyBytes = hexToBytes(keyHex);
+  if (keyBytes.byteLength !== 32) {
+    throw new Error(`Expected 32-byte AES key, got ${keyBytes.byteLength}`);
+  }
+
+  const iv = new Uint8Array(await crypto.subtle.digest("SHA-256", toArrayBuffer(keyBytes))).slice(
+    0,
+    12,
+  );
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(keyBytes),
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+
+  let plain: ArrayBuffer;
+  try {
+    plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, tagLength: 128 },
+      cryptoKey,
+      encrypted,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`AES-GCM decrypt failed for Artificial Analysis manifest: ${message}`);
+  }
+
+  const stream = new Response(plain).body?.pipeThrough(new DecompressionStream("gzip"));
+  if (!stream) {
+    throw new Error("DecompressionStream is unavailable in this runtime");
+  }
+
+  const text = await new Response(stream).text();
+  return JSON.parse(text);
+}
+
+function modelsFromManifestPayload(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) {
+    // Endpoint/host manifests are arrays of host-model rows, not model scores.
+    // Only treat them as model lists when entries look like models.
+    if (payload.some(hasModelScoreFields) || payload.some(looksLikeModelRow)) {
+      return payload;
+    }
+    return [];
+  }
+
+  const record = asRecord(payload);
+  for (const key of ["models", "defaultData", "initialModels", "data"]) {
+    const value = record[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  return [];
+}
+
+function pickBestNormalized(candidates: unknown[][]): ParsedModelResult[] | null {
+  let best: ParsedModelResult[] | null = null;
+  let bestScoreable = -1;
+  let bestTotal = -1;
+
+  for (const candidate of candidates) {
+    const results = candidate
+      .map(normalizeModel)
+      .filter((model) => model.modelKey.length > 0 && model.name.length > 0);
+    const scoreable = results.filter(isScoreable).length;
+
+    if (
+      best == null ||
+      scoreable > bestScoreable ||
+      (scoreable === bestScoreable && results.length > bestTotal)
+    ) {
+      best = results;
+      bestScoreable = scoreable;
+      bestTotal = results.length;
+    }
+  }
+
+  return best;
+}
+
 function hasModelScoreFields(input: unknown): boolean {
   const model = asRecord(input);
   const cost = firstRecord(model.intelligence_index_cost, model.intelligenceIndexCost);
@@ -178,6 +364,7 @@ function hasModelScoreFields(input: unknown): boolean {
     numberOrNull(model.intelligenceIndex) != null ||
     numberOrNull(model.coding_index) != null ||
     numberOrNull(model.codingIndex) != null ||
+    numberOrNull(cost.total) != null ||
     numberOrNull(cost.total_cost) != null ||
     numberOrNull(cost.totalCost) != null ||
     numberOrNull(taskCost.total) != null ||
@@ -185,6 +372,14 @@ function hasModelScoreFields(input: unknown): boolean {
     numberOrNull(taskCost.totalCost) != null ||
     numberOrNull(model.intelligence_index_cost_per_task) != null ||
     numberOrNull(model.intelligenceIndexCostPerTask) != null
+  );
+}
+
+function looksLikeModelRow(input: unknown): boolean {
+  const model = asRecord(input);
+  return (
+    (stringOrNull(model.slug) != null || stringOrNull(model.id) != null) &&
+    (stringOrNull(model.name) != null || stringOrNull(model.shortName) != null)
   );
 }
 
@@ -211,11 +406,18 @@ function normalizeModel(input: unknown): ParsedModelResult {
   const releaseDate = stringOrNull(model.release_date) ?? stringOrNull(model.releaseDate);
   const cutoffDate =
     stringOrNull(model.knowledge_cutoff_date) ?? stringOrNull(model.knowledgeCutoffDate);
-  const totalCost = numberOrNull(cost.total_cost) ?? numberOrNull(cost.totalCost);
-  const inputCost = numberOrNull(cost.input_cost) ?? numberOrNull(cost.inputCost);
-  const outputCost = numberOrNull(cost.output_cost) ?? numberOrNull(cost.outputCost);
-  const reasoningCost = numberOrNull(cost.reasoning_cost) ?? numberOrNull(cost.reasoningCost);
-  const answerCost = numberOrNull(cost.answer_cost) ?? numberOrNull(cost.answerCost);
+  const totalCost =
+    numberOrNull(cost.total) ?? numberOrNull(cost.total_cost) ?? numberOrNull(cost.totalCost);
+  const inputCost =
+    numberOrNull(cost.input) ?? numberOrNull(cost.input_cost) ?? numberOrNull(cost.inputCost);
+  const outputCost =
+    numberOrNull(cost.output) ?? numberOrNull(cost.output_cost) ?? numberOrNull(cost.outputCost);
+  const reasoningCost =
+    numberOrNull(cost.reasoning) ??
+    numberOrNull(cost.reasoning_cost) ??
+    numberOrNull(cost.reasoningCost);
+  const answerCost =
+    numberOrNull(cost.answer) ?? numberOrNull(cost.answer_cost) ?? numberOrNull(cost.answerCost);
   const costPerTask =
     numberOrNull(taskCost.total) ??
     numberOrNull(taskCost.total_cost) ??
@@ -247,11 +449,17 @@ function normalizeModel(input: unknown): ParsedModelResult {
   const agentic = numberOrNull(model.agentic_index) ?? numberOrNull(model.agenticIndex);
   const mmmu = numberOrNull(model.mmmu_pro) ?? numberOrNull(model.mmmuPro);
   const priceInput1m =
-    numberOrNull(model.price_1m_input_tokens) ?? numberOrNull(model.priceInput1m);
+    numberOrNull(model.price_1m_input_tokens) ??
+    numberOrNull(model.price1mInputTokens) ??
+    numberOrNull(model.priceInput1m);
   const priceOutput1m =
-    numberOrNull(model.price_1m_output_tokens) ?? numberOrNull(model.priceOutput1m);
+    numberOrNull(model.price_1m_output_tokens) ??
+    numberOrNull(model.price1mOutputTokens) ??
+    numberOrNull(model.priceOutput1m);
   const activeParams =
-    numberOrNull(model.activeParams) ?? numberOrNull(model.inference_parameters_active_billions);
+    numberOrNull(model.activeParams) ??
+    numberOrNull(model.inferenceParametersActiveBillions) ??
+    numberOrNull(model.inference_parameters_active_billions);
   const isOpenWeights = booleanOrNull(model.is_open_weights) ?? booleanOrNull(model.isOpenWeights);
   const isReasoning = booleanOrNull(model.reasoning_model) ?? booleanOrNull(model.isReasoning);
 
@@ -360,4 +568,26 @@ function slugify(value: string): string {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) {
+    throw new Error("Hex key must have even length");
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    const byte = Number.parseInt(hex.slice(i, i + 2), 16);
+    if (!Number.isFinite(byte)) {
+      throw new Error("Hex key contains non-hex characters");
+    }
+    bytes[i / 2] = byte;
+  }
+  return bytes;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }

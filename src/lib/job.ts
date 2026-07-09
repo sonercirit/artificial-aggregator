@@ -8,6 +8,7 @@
  */
 
 import { ARTIFICIAL_ANALYSIS_URL, parseHtmlToResults } from "./aa";
+import type { ParseHtmlOptions } from "./aa";
 import type { FetchRun } from "./db";
 import {
   completeFetchRun,
@@ -40,6 +41,8 @@ const RESPONSE_TEXT_TIMEOUT_MS = 20_000;
 const COMPRESSION_TIMEOUT_MS = 20_000;
 const RAW_HTML_WRITE_TIMEOUT_MS = 20_000;
 const MODEL_WRITE_TIMEOUT_MS = 30_000;
+const PARSE_TIMEOUT_MS = 45_000;
+const MANIFEST_FETCH_TIMEOUT_MS = 15_000;
 const REPAIR_RAW_RUN_LIMIT = 2;
 const REPAIR_TIMEOUT_MS = 60_000;
 const FINAL_UPDATE_TIMEOUT_MS = 10_000;
@@ -100,7 +103,11 @@ export async function runFetchJob(
       throw new Error(`Artificial Analysis returned HTTP ${response.status}`);
     }
 
-    const results = parseHtmlToResults(html);
+    const results = await withTimeout(
+      parseHtmlToResults(html, parseOptionsFor(sourceUrl)),
+      "parse Artificial Analysis payload",
+      PARSE_TIMEOUT_MS,
+    );
     runId = await withTimeout(createFetchRun(env, sourceUrl, startedAt), "create fetch run", 5_000);
     console.log(`Fetch run ${runId} started`);
 
@@ -256,7 +263,11 @@ async function repairRawOnlyRuns(env: Bindings): Promise<number> {
       if (chunks.length === 0) continue;
 
       const html = await gunzipBase64ChunksToString(chunks);
-      const results = parseHtmlToResults(html);
+      const results = await withTimeout(
+        parseHtmlToResults(html, parseOptionsFor(run.source_url || ARTIFICIAL_ANALYSIS_URL)),
+        `parse repaired payload for run ${run.id}`,
+        PARSE_TIMEOUT_MS,
+      );
 
       await withTimeout(
         updateFetchRunProgress(env, run.id, {
@@ -463,4 +474,43 @@ async function withTimeout<T>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Build parser options that can resolve and fetch the encrypted `/data/*.txt`
+ * model manifests that newer Artificial Analysis pages reference.
+ */
+function parseOptionsFor(sourceUrl: string): ParseHtmlOptions {
+  const origin = new URL(sourceUrl, ARTIFICIAL_ANALYSIS_URL).origin;
+
+  return {
+    resolveUrl: (path) => new URL(path, origin).toString(),
+    fetchBinary: async (url) => {
+      const controller = new AbortController();
+      const response = await withTimeout(
+        fetch(url, {
+          headers: {
+            accept: "*/*",
+            "cache-control": "no-cache",
+            "user-agent": "artificial-aggregator/0.1 (+https://workers.cloudflare.com/)",
+          },
+          signal: controller.signal,
+        }),
+        `fetch manifest ${url}`,
+        MANIFEST_FETCH_TIMEOUT_MS,
+        () => controller.abort(),
+      );
+
+      if (!response.ok) {
+        throw new Error(`manifest ${url} returned HTTP ${response.status}`);
+      }
+
+      return withTimeout(
+        response.arrayBuffer(),
+        `read manifest ${url}`,
+        MANIFEST_FETCH_TIMEOUT_MS,
+        () => controller.abort(),
+      );
+    },
+  };
 }
