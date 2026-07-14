@@ -132,7 +132,7 @@ export function layout(title: string, body: string, context: RenderContext = {})
     </nav>
   </header>
   <main>${body}</main>
-  <footer class="site-footer">created by <a href="https://sonercir.it" target="_blank" rel="noopener noreferrer">sonercir.it</a></footer>
+  <footer class="site-footer">created by <a href="https://sonercir.it" target="_blank" rel="noopener noreferrer">sonercir.it</a> · <a href="https://github.com/sonercirit/artificial-aggregator" target="_blank" rel="noopener noreferrer">GitHub</a></footer>
 </body>
 </html>`;
 }
