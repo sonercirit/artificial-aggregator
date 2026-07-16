@@ -70,4 +70,4 @@ The cron in `wrangler.toml` runs at minute `0` every hour.
 - `/api/winners` historic #1 winner timeline for current scoring query params
 - `/api/models/:modelKey/timeline`
 
-Raw HTML is stored as gzip-compressed base64 chunks in D1 so large Artificial Analysis snapshots do not need to fit in a single SQLite row. To stay below D1 size limits, scheduled fetches retain raw HTML for the latest 72 runs, compact raw per-model JSON after 500 runs, and keep the latest 1500 runs for scoring/history.
+Raw HTML is stored as gzip-compressed base64 chunks in D1 so large Artificial Analysis snapshots do not need to fit in a single SQLite row. Only scoreable model rows are normalized because every comparison/history query requires those same fields; duplicate per-model source JSON is not stored. To stay below D1's 500 MB free-plan limit, scheduled maintenance runs before each fetch, retains raw HTML for the latest 72 runs, incrementally replaces legacy 500+ row snapshots, and keeps a rolling window of roughly 900 normalized runs for scoring/history.

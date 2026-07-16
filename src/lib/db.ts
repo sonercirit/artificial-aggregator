@@ -5,7 +5,7 @@
  */
 
 import type { ParsedModelResult } from "./aa";
-import { PARSER_VERSION } from "./aa";
+import { isScoreable, PARSER_VERSION } from "./aa";
 import type { Bindings } from "../types";
 
 export type FetchRunStatus = "running" | "success" | "error" | "skipped";
@@ -89,6 +89,19 @@ export type TimelineRun = {
 const SCOREABLE_SQL = `COALESCE(mr.cost_per_task, mr.total_cost) > 0
            AND mr.intelligence IS NOT NULL
            AND mr.coding IS NOT NULL`;
+
+/** Explicit inverse of SCOREABLE_SQL (NOT would not match SQL NULL values). */
+const UNSCOREABLE_SQL = `(COALESCE(mr.cost_per_task, mr.total_cost) IS NULL
+           OR COALESCE(mr.cost_per_task, mr.total_cost) <= 0
+           OR mr.intelligence IS NULL
+           OR mr.coding IS NULL)`;
+
+const DEFAULT_KEEP_RUNS = 900;
+const DEFAULT_KEEP_RAW_RUNS = 72;
+const DEFAULT_KEEP_RAW_RESULT_RUNS = 72;
+/** Caps cleanup work so maintenance remains within D1's daily write allowance. */
+const DEFAULT_MODEL_MAINTENANCE_ROWS = 600;
+const DEFAULT_DELETE_RUNS_PER_PASS = 1;
 
 // ---------------------------------------------------------------------------
 // Run lifecycle
@@ -296,6 +309,9 @@ export async function getRepairableRawRuns(
        AND (fr.status = 'error' OR fr.started_at < ?)
        AND fr.http_status BETWEEN 200 AND 299
        AND fr.raw_html_encoding <> 'pruned'
+       -- Retrying a quota failure just fills the database again. Keep those
+       -- runs as audit records and let the next fresh snapshot replace them.
+       AND COALESCE(fr.error, '') NOT LIKE '%Exceeded maximum DB size%'
        AND EXISTS (
          SELECT 1 FROM raw_html_chunks rhc
          WHERE rhc.run_id = fr.id
@@ -338,10 +354,19 @@ export async function storeModelResults(
   env: Bindings,
   runId: number,
   results: ParsedModelResult[],
-): Promise<void> {
+): Promise<number> {
+  // Every read path filters on these same fields. Persisting the hundreds of
+  // scoreless catalog entries from each hourly manifest only duplicates data
+  // that the application can never display, and previously filled free-plan
+  // D1 databases long before the run-retention window was reached.
+  const storedResults = results.filter(isScoreable);
+  if (storedResults.length === 0) {
+    throw new Error("Artificial Analysis payload contained no scoreable model results");
+  }
+
   await env.DB.prepare("DELETE FROM model_results WHERE run_id = ?").bind(runId).run();
 
-  const statements = results.map((result) =>
+  const statements = storedResults.map((result) =>
     env.DB.prepare(
       `INSERT INTO model_results (
         run_id, model_key, source_id, slug, name, short_name,
@@ -418,11 +443,29 @@ export async function storeModelResults(
       result.activeParams,
       boolToInt(result.isOpenWeights),
       boolToInt(result.isReasoning),
-      result.rawResultJson,
+      // The exact source HTML is already retained in compressed chunks. The
+      // per-row JSON duplicates most of every manifest and was the largest
+      // contributor to D1 growth; normalized columns contain every field the
+      // application reads.
+      "{}",
     ),
   );
 
-  await batchStatements(env, statements, 80);
+  try {
+    await batchStatements(env, statements, 80);
+  } catch (error) {
+    // batchStatements uses several transactions for large manifests. If a
+    // later batch fails (for example at the D1 size limit), do not strand the
+    // earlier batches and permanently consume the remaining free pages.
+    try {
+      await env.DB.prepare("DELETE FROM model_results WHERE run_id = ?").bind(runId).run();
+    } catch (cleanupError) {
+      console.warn(`Could not clean partial model rows for run ${runId}`, cleanupError);
+    }
+    throw error;
+  }
+
+  return storedResults.length;
 }
 
 export async function getRawHtmlBase64Chunks(env: Bindings, runId: number): Promise<string[]> {
@@ -441,27 +484,40 @@ export type PruneStoredRunDataInput = {
   keepRuns?: number;
   keepRawRuns?: number;
   keepRawResultRuns?: number;
+  maxModelRowsPerPass?: number;
+  maxRunsPerPass?: number;
 };
 
 export type PruneStoredRunDataResult = {
   deletedRuns: number;
   deletedRawChunks: number;
+  deletedIncompleteResults: number;
+  deletedUnscoreableResults: number;
   prunedRunMetadata: number;
   prunedRawResultJson: number;
 };
 
 /**
- * Keeps D1 below its size limits: raw HTML chunks survive only for the most
- * recent runs, per-model raw JSON a while longer, and run/score history the
- * longest. Defaults: 72 raw-HTML runs, 500 raw-JSON runs, 1500 runs total.
+ * Keeps D1 below its size limits: exact raw HTML survives for recent runs and
+ * normalized score history survives the longest. It also drains duplicate raw
+ * JSON and unscoreable rows written by older deployments. Model-row cleanup is
+ * deliberately incremental so recovery cannot exhaust D1's free-plan daily
+ * write allowance.
+ *
+ * Defaults: 72 raw-HTML runs and a rolling window of about 900 runs.
  */
 export async function pruneStoredRunData(
   env: Bindings,
   input: PruneStoredRunDataInput = {},
 ): Promise<PruneStoredRunDataResult> {
-  const keepRuns = positiveLimit(input.keepRuns, 1500);
-  const keepRawRuns = Math.min(positiveLimit(input.keepRawRuns, 72), keepRuns);
-  const keepRawResultRuns = Math.min(positiveLimit(input.keepRawResultRuns, 500), keepRuns);
+  const keepRuns = positiveLimit(input.keepRuns, DEFAULT_KEEP_RUNS);
+  const keepRawRuns = Math.min(positiveLimit(input.keepRawRuns, DEFAULT_KEEP_RAW_RUNS), keepRuns);
+  const keepRawResultRuns = Math.min(
+    positiveLimit(input.keepRawResultRuns, DEFAULT_KEEP_RAW_RESULT_RUNS),
+    keepRuns,
+  );
+  let modelRowsRemaining = positiveLimit(input.maxModelRowsPerPass, DEFAULT_MODEL_MAINTENANCE_ROWS);
+  const maxRunsPerPass = positiveLimit(input.maxRunsPerPass, DEFAULT_DELETE_RUNS_PER_PASS);
 
   const deletedRawChunks = await env.DB.prepare(
     `DELETE FROM raw_html_chunks
@@ -487,35 +543,101 @@ export async function pruneStoredRunData(
     .bind(keepRawRuns)
     .run();
 
-  const prunedRawResultJson = await env.DB.prepare(
-    `UPDATE model_results
-     SET raw_result_json = '{}'
-     WHERE raw_result_json <> '{}'
-       AND run_id NOT IN (
+  // Delete at most one complete old snapshot before row-level cleanup. A
+  // cascade releases contiguous table/index pages, which is the reliable way
+  // to recover when SQLite has reached its maximum page count. Replacing one
+  // legacy 500+ row snapshot with a scoreable-only snapshot also steadily
+  // reduces the live data set without bursting D1's daily write allowance.
+  const deletedRunsResult = await env.DB.prepare(
+    `DELETE FROM fetch_runs
+     WHERE id IN (
+       SELECT id
+       FROM fetch_runs
+       WHERE id NOT IN (
          SELECT id FROM fetch_runs
          ORDER BY started_at DESC, id DESC
          LIMIT ?
-       )`,
+       )
+       ORDER BY started_at ASC, id ASC
+       LIMIT ?
+     )
+     RETURNING id`,
   )
-    .bind(keepRawResultRuns)
-    .run();
+    .bind(keepRuns, maxRunsPerPass)
+    .run<{ id: number }>();
+  const deletedRuns = deletedRunsResult.results?.length ?? 0;
+  if (deletedRuns > 0) modelRowsRemaining = 0;
 
-  const deletedRuns = await env.DB.prepare(
-    `DELETE FROM fetch_runs
-     WHERE id NOT IN (
-       SELECT id FROM fetch_runs
-       ORDER BY started_at DESC, id DESC
+  // Deletes release whole SQLite pages that can be reused even when the D1
+  // file is already at its hard size limit. Start with legacy catalog rows;
+  // unlike shrinking TEXT in-place, this creates room for the next snapshot.
+  const deletedUnscoreableResults = await runLimitedModelMutation(
+    env,
+    `DELETE FROM model_results
+     WHERE id IN (
+       SELECT mr.id
+       FROM model_results mr
+       WHERE EXISTS (
+         SELECT 1 FROM fetch_runs fr
+         WHERE fr.id = mr.run_id AND fr.status IN ('success', 'error')
+       )
+         AND ${UNSCOREABLE_SQL}
+       ORDER BY mr.run_id ASC, mr.id ASC
        LIMIT ?
      )`,
-  )
-    .bind(keepRuns)
-    .run();
+    modelRowsRemaining,
+  );
+  modelRowsRemaining -= deletedUnscoreableResults;
+
+  // Remove rows left by a failed multi-batch write. They are neither a
+  // successful snapshot nor repairable while any partial rows remain.
+  const deletedIncompleteResults = await runLimitedModelMutation(
+    env,
+    `DELETE FROM model_results
+     WHERE id IN (
+       SELECT mr.id
+       FROM model_results mr
+       WHERE mr.run_id IN (
+         SELECT fr.id FROM fetch_runs fr
+         WHERE fr.status = 'error' AND fr.result_count = 0
+       )
+       ORDER BY mr.run_id ASC, mr.id ASC
+       LIMIT ?
+     )`,
+    modelRowsRemaining,
+  );
+  modelRowsRemaining -= deletedIncompleteResults;
+
+  // Compact legacy scoreable payloads after page-releasing work. New rows no
+  // longer store this duplicate JSON, so this backlog only decreases.
+  const prunedRawResultJson = await runLimitedModelMutation(
+    env,
+    `UPDATE model_results
+     SET raw_result_json = '{}'
+     WHERE id IN (
+       SELECT mr.id
+       FROM model_results mr
+       WHERE mr.raw_result_json <> '{}'
+         AND ${SCOREABLE_SQL}
+         AND mr.run_id NOT IN (
+           SELECT id FROM fetch_runs
+           ORDER BY started_at DESC, id DESC
+           LIMIT ?
+         )
+       ORDER BY mr.run_id ASC, mr.id ASC
+       LIMIT ?
+     )`,
+    modelRowsRemaining,
+    keepRawResultRuns,
+  );
 
   return {
-    deletedRuns: dbChanges(deletedRuns),
+    deletedRuns,
     deletedRawChunks: dbChanges(deletedRawChunks),
+    deletedIncompleteResults,
+    deletedUnscoreableResults,
     prunedRunMetadata: dbChanges(prunedRunMetadata),
-    prunedRawResultJson: dbChanges(prunedRawResultJson),
+    prunedRawResultJson,
   };
 }
 
@@ -783,6 +905,20 @@ function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): T
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async function runLimitedModelMutation(
+  env: Bindings,
+  query: string,
+  limit: number,
+  ...leadingBindings: unknown[]
+): Promise<number> {
+  if (limit <= 0) return 0;
+
+  const result = await env.DB.prepare(query)
+    .bind(...leadingBindings, limit)
+    .run();
+  return dbChanges(result);
+}
 
 async function batchStatements(
   env: Bindings,

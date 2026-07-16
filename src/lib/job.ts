@@ -43,7 +43,7 @@ const RAW_HTML_WRITE_TIMEOUT_MS = 20_000;
 const MODEL_WRITE_TIMEOUT_MS = 30_000;
 const PARSE_TIMEOUT_MS = 45_000;
 const MANIFEST_FETCH_TIMEOUT_MS = 15_000;
-const REPAIR_RAW_RUN_LIMIT = 2;
+const REPAIR_RAW_RUN_LIMIT = 1;
 const REPAIR_TIMEOUT_MS = 60_000;
 const FINAL_UPDATE_TIMEOUT_MS = 10_000;
 const FAILURE_UPDATE_TIMEOUT_MS = 5_000;
@@ -133,7 +133,7 @@ export async function runFetchJob(
     );
     rawHtmlStored = true;
 
-    await withTimeout(
+    const resultCount = await withTimeout(
       storeModelResults(env, runId, results),
       "store model results",
       MODEL_WRITE_TIMEOUT_MS,
@@ -147,18 +147,20 @@ export async function runFetchJob(
         htmlSha256,
         htmlGzipBytes,
         modelCount: results.length,
-        resultCount: results.length,
+        resultCount,
       }),
       "complete fetch run",
       FINAL_UPDATE_TIMEOUT_MS,
     );
 
-    console.log(`Fetch run ${runId} completed with ${results.length} model result(s)`);
+    console.log(
+      `Fetch run ${runId} completed with ${resultCount} scoreable result(s) from ${results.length} parsed model(s)`,
+    );
     return {
       runId,
       skipped: false,
       modelCount: results.length,
-      resultCount: results.length,
+      resultCount,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -204,7 +206,7 @@ export async function runFetchJob(
   }
 }
 
-/** Pre-flight housekeeping: flag stale runs, repair raw-only runs, prune storage. */
+/** Pre-flight housekeeping: flag stale runs, free storage, then repair raw-only runs. */
 async function runMaintenance(env: Bindings): Promise<void> {
   const staleRuns = await withTimeout(
     markStaleRunningRuns(env),
@@ -213,6 +215,26 @@ async function runMaintenance(env: Bindings): Promise<void> {
   );
   if (staleRuns > 0) {
     console.warn(`Marked ${staleRuns} stale running fetch run(s) as error`);
+  }
+
+  // Pruning must precede repair. Repair writes a complete model snapshot and
+  // was previously attempted against an already-full database every hour.
+  const pruned = await withTimeout(
+    pruneStoredRunData(env),
+    "prune old stored run data",
+    PRUNE_TIMEOUT_MS,
+  );
+  const prunedItems =
+    pruned.deletedRuns +
+    pruned.deletedRawChunks +
+    pruned.deletedIncompleteResults +
+    pruned.deletedUnscoreableResults +
+    pruned.prunedRunMetadata +
+    pruned.prunedRawResultJson;
+  if (prunedItems > 0) {
+    console.log(
+      `Pruned stored run data: ${pruned.deletedRuns} run(s), ${pruned.deletedRawChunks} raw chunk(s), ${pruned.deletedIncompleteResults} incomplete result(s), ${pruned.deletedUnscoreableResults} unscoreable result(s), ${pruned.prunedRawResultJson} raw model payload(s)`,
+    );
   }
 
   try {
@@ -226,22 +248,6 @@ async function runMaintenance(env: Bindings): Promise<void> {
     }
   } catch (error) {
     console.warn("Could not repair raw-only fetch runs", error);
-  }
-
-  const pruned = await withTimeout(
-    pruneStoredRunData(env),
-    "prune old stored run data",
-    PRUNE_TIMEOUT_MS,
-  );
-  const prunedItems =
-    pruned.deletedRuns +
-    pruned.deletedRawChunks +
-    pruned.prunedRunMetadata +
-    pruned.prunedRawResultJson;
-  if (prunedItems > 0) {
-    console.log(
-      `Pruned stored run data: ${pruned.deletedRuns} run(s), ${pruned.deletedRawChunks} raw chunk(s), ${pruned.prunedRawResultJson} raw model payload(s)`,
-    );
   }
 }
 
@@ -277,7 +283,7 @@ async function repairRawOnlyRuns(env: Bindings): Promise<number> {
         `record repaired model count for run ${run.id}`,
         FINAL_UPDATE_TIMEOUT_MS,
       );
-      await withTimeout(
+      const resultCount = await withTimeout(
         storeModelResults(env, run.id, results),
         `store repaired model results for run ${run.id}`,
         MODEL_WRITE_TIMEOUT_MS,
@@ -290,7 +296,7 @@ async function repairRawOnlyRuns(env: Bindings): Promise<number> {
           htmlSha256: run.html_sha256,
           htmlGzipBytes: run.html_gzip_bytes,
           modelCount: results.length,
-          resultCount: results.length,
+          resultCount,
           completedAt: repairedCompletedAt(run),
         }),
         `complete repaired fetch run ${run.id}`,
