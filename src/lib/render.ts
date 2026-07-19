@@ -125,9 +125,11 @@ export function layout(title: string, body: string, context: RenderContext = {})
   <header>
     <nav>
       <a class="brand" href="/">Artificial Aggregator</a>
-      <a href="/runs">Runs</a>
-      <a href="/history">Model timelines</a>
-      <a href="/api/runs">API</a>
+      <div class="nav-links">
+        <a href="/runs">Runs</a>
+        <a href="/history">Model timelines</a>
+        <a href="/api/runs">API</a>
+      </div>
       ${renderThemeSelect(theme, currentPath)}
     </nav>
   </header>
@@ -221,7 +223,7 @@ export function renderRuns(runs: FetchRun[], context: RenderContext = {}): strin
   return layout(
     "Runs",
     `<section class="hero"><h1>Fetch runs</h1><p class="muted">Every hourly execution stores compressed raw HTML chunks and normalized model results.</p></section>
-    <div class="table-wrap"><table>
+    <div class="table-wrap" role="region" aria-label="Fetch runs table" tabindex="0"><table class="runs-table">
       <thead><tr>${thTip("Run", "Fetch execution id.")}${thTip("Status", "Current outcome of the fetch execution.")}${thTip("Started", "When this fetch execution started.")}${thTip("Completed", "When this fetch execution finished.")}${thTip("Duration", "Total execution time.", "num")}${thTip("HTTP", "HTTP status returned by the source page.", "num")}${thTip("Models", "Number of normalized model results stored.", "num")}${thTip("HTML", "Raw HTML snapshot size before gzip compression.", "num")}${thTip("SHA-256", "Hash of the exact raw HTML snapshot.")}${thTip("Raw/Error", "Download raw HTML for successful runs, or view the error for failed runs.")}</tr></thead>
       <tbody>${rows || `<tr><td colspan="10" class="empty">No runs yet.</td></tr>`}</tbody>
     </table></div>`,
@@ -272,7 +274,7 @@ export function renderHistory(models: ModelSummary[], context: RenderContext = {
   return layout(
     "Model timelines",
     `<section class="hero"><h1>Historic model timelines</h1><p class="muted">Choose a model to inspect score, quality, Cost per Task, and Time per Task across successful hourly snapshots.</p></section>
-    <div class="table-wrap"><table>
+    <div class="table-wrap" role="region" aria-label="Historic model timelines table" tabindex="0"><table class="history-table">
       <thead><tr>${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Key", "Stable model key used to join results across snapshots.")}${thTip("Samples", "Number of successful snapshots containing this model.", "num")}${thTip("Latest sample", "Most recent successful snapshot containing this model.")}</tr></thead>
       <tbody>${rows || `<tr><td colspan="4" class="empty">No model results yet.</td></tr>`}</tbody>
     </table></div>`,
@@ -343,7 +345,7 @@ export function renderModelTimeline(
       ${renderTimelineForm(options)}
     </section>
     <section class="charts">${scoreChart}${costChart}${timeChart}</section>
-    <div class="table-wrap"><table>
+    <div class="table-wrap" role="region" aria-label="Model timeline samples table" tabindex="0"><table class="timeline-table">
       <thead><tr>${thTip("Run", "Fetch execution id for this sample.")}${thTip("Fetched", "When this sample was fetched.")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}${thTip("Quality", "Selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "AA weighted average Cost per Task in dollars. Falls back to legacy benchmark cost for older snapshots.", "num")}${thTip("Time/task", "AA weighted average Time per Task.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("MMMU%", "MMMU Pro score as a percentage when available.", "num")}</tr></thead>
       <tbody>${tableRows || `<tr><td colspan="10" class="empty">No timeline samples for this model.</td></tr>`}</tbody>
     </table></div>`,
@@ -416,7 +418,7 @@ function renderCostQualityScatter(rows: ScoredRow[], options: ScoreOptions): str
   return `<section class="scatter-panel">
     <h2>${headingWithTip(`${axis.shortLabel} vs quality`, HELP.scatter)}</h2>
     <p class="muted">${plottable.length} models · ${frontier.length} on the Pareto frontier · <strong>${escapeHtml(options.mode)}</strong> quality vs ${escapeHtml(axis.label)}</p>
-    ${svg}
+    <div class="chart-scroll chart-scroll-wide" role="region" aria-label="Scrollable ${escapeHtml(axis.shortLabel)} versus quality chart" tabindex="0">${svg}</div>
   </section>`;
 }
 
@@ -552,13 +554,13 @@ function renderWinnerTimeline(
         <strong>${scoreFormat(latest.calculated)}</strong>
       </div>
     </div>
-    ${svg}
+    <div class="chart-scroll chart-scroll-wide" role="region" aria-label="Scrollable historic winner chart" tabindex="0">${svg}</div>
     <div class="winner-grid">
       <div>
         <h3>Recent winner changes</h3>
         <div class="winner-chips">${changeChips}</div>
       </div>
-      <div class="table-wrap compact-table"><table>
+      <div class="table-wrap compact-table" role="region" aria-label="Recent historic winners table" tabindex="0"><table>
         <thead><tr>${thTip("Run", "Fetch execution id for this winner.")}${thTip("Fetched", "When this winning snapshot was fetched.")}${thTip("Winner", "Top-ranked model for that snapshot.")}${thTip("Score", "Winner's final calculated score.", "num")}${thTip("Qual", "Winner's selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "Winner's Cost per Task in dollars.", "num")}${thTip("Time/task", "Winner's Time per Task.", "num")}</tr></thead>
         <tbody>${recentRows}</tbody>
       </table></div>
@@ -594,7 +596,7 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
     })
     .join("");
 
-  return `<div class="table-wrap score-table-wrap"><table class="score-table">
+  return `<div class="table-wrap score-table-wrap" role="region" aria-label="Model score comparison table" tabindex="0"><table class="score-table">
     <colgroup>
       <col class="rank-col">
       <col class="pareto-col">
@@ -667,7 +669,7 @@ function renderMetricChart(input: {
 
   return `<article class="chart">
     <h2>${escapeHtml(title)}</h2>
-    ${svg}
+    <div class="chart-scroll chart-scroll-compact" role="region" aria-label="Scrollable ${escapeHtml(title)} chart" tabindex="0">${svg}</div>
   </article>`;
 }
 
@@ -692,7 +694,7 @@ function renderScoreForm(
       </select>
     </label>`;
 
-  return `<form class="controls controls-categorized" method="get" action="/">
+  return `<form class="controls controls-categorized score-controls" method="get" action="/">
     ${controlGroup("Snapshot", "Pick the stored fetch snapshot to compare.", runControl)}
     ${controlGroup(
       "Scoring",
@@ -710,7 +712,7 @@ function renderScoreForm(
 }
 
 function renderTimelineForm(options: ScoreOptions): string {
-  return `<form class="controls controls-categorized compact" method="get">
+  return `<form class="controls controls-categorized timeline-controls compact" method="get">
     ${controlGroup(
       "Scoring",
       "Choose the quality benchmark and final score formula for this model.",

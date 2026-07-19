@@ -108,19 +108,27 @@
       const margin = 8;
       const gap = 10;
       let left = rect.left + rect.width / 2 - bubbleRect.width / 2;
-      left = Math.max(margin, Math.min(left, window.innerWidth - bubbleRect.width - margin));
+      const maxLeft = Math.max(margin, window.innerWidth - bubbleRect.width - margin);
+      left = Math.max(margin, Math.min(left, maxLeft));
 
-      let top = rect.top - bubbleRect.height - gap;
-      let placement = "above";
-      if (top < margin) {
-        top = rect.bottom + gap;
-        placement = "below";
-      }
+      const above = rect.top - bubbleRect.height - gap;
+      const below = rect.bottom + gap;
+      const fitsAbove = above >= margin;
+      const fitsBelow = below + bubbleRect.height <= window.innerHeight - margin;
+      const useBelow = !fitsAbove && (fitsBelow || rect.top < window.innerHeight - rect.bottom);
+      const placement = useBelow ? "below" : "above";
+      let top = useBelow ? below : above;
+      const maxTop = Math.max(margin, window.innerHeight - bubbleRect.height - margin);
+      top = Math.max(margin, Math.min(top, maxTop));
 
+      const arrowLeft = Math.max(
+        10,
+        Math.min(rect.left + rect.width / 2 - left, bubbleRect.width - 10),
+      );
       bubble.dataset.placement = placement;
       bubble.style.left = `${left}px`;
       bubble.style.top = `${top}px`;
-      bubble.style.setProperty("--arrow-left", `${rect.left + rect.width / 2 - left}px`);
+      bubble.style.setProperty("--arrow-left", `${arrowLeft}px`);
     };
 
     const show = (target) => {
@@ -160,6 +168,7 @@
 
     window.addEventListener("scroll", position, true);
     window.addEventListener("resize", position);
+    window.visualViewport?.addEventListener("resize", position);
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape") hide();
     });
