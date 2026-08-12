@@ -55,6 +55,11 @@ curl -X POST "http://localhost:8787/admin/fetch?token=$ADMIN_TOKEN"
 npm run deploy
 ```
 
+This applies pending D1 migrations to the remote database and then uploads the
+Worker, so schema changes ship with the code that needs them. Cloudflare's
+GitHub build must therefore use `npm run deploy` as its deploy command rather
+than the default `npx wrangler deploy`.
+
 The cron in `wrangler.toml` runs at minute `0` every hour.
 
 ## Useful routes
