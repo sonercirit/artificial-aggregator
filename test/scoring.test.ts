@@ -31,7 +31,6 @@ function model(overrides: Partial<ParsedModelResult> = {}): ParsedModelResult {
     answerCostPerTask: null,
     timePerTask: null,
     intelligence: 50,
-    coding: 50,
     agentic: null,
     mmmu: null,
     priceInput1m: null,
@@ -52,12 +51,12 @@ describe("parseScoreOptions", () => {
   it("parses explicit values, including alias keys", () => {
     const options = parseScoreOptions(
       new URLSearchParams(
-        "mode=coding&calc=div&sort=cost&pareto=only&pareto-by=time&cost-weight=5&costFloor=0.5&costPower=0.5&limit=25",
+        "mode=mmmu&calc=div&sort=cost&pareto=only&pareto-by=time&cost-weight=5&costFloor=0.5&costPower=0.5&limit=25",
       ),
     );
 
     expect(options).toEqual({
-      mode: "coding",
+      mode: "mmmu",
       calc: "div",
       sort: "cost",
       frontierOnly: true,
@@ -102,10 +101,9 @@ describe("parseScoreOptions", () => {
 
 describe("qualityFor", () => {
   it("selects the metric for single-metric modes", () => {
-    const row = model({ intelligence: 60, coding: 40, agentic: 30, mmmu: 0.5 });
+    const row = model({ intelligence: 60, agentic: 30, mmmu: 0.5 });
 
     expect(qualityFor(row, "intelligence")).toBe(60);
-    expect(qualityFor(row, "coding")).toBe(40);
     expect(qualityFor(row, "agentic")).toBe(30);
     expect(qualityFor(row, "mmmu")).toBe(50);
   });
@@ -115,12 +113,10 @@ describe("qualityFor", () => {
     expect(qualityFor(model({ mmmu: null }), "mmmu")).toBeNull();
   });
 
-  it("averages intelligence and coding for combined, including agentic when present", () => {
-    expect(qualityFor(model({ intelligence: 60, coding: 40, agentic: null }), "combined")).toBe(50);
-    expect(qualityFor(model({ intelligence: 60, coding: 40, agentic: 20 }), "combined")).toBe(40);
-    expect(
-      qualityFor(model({ intelligence: null, coding: null, agentic: null }), "combined"),
-    ).toBeNull();
+  it("averages intelligence and agentic for combined, ignoring missing metrics", () => {
+    expect(qualityFor(model({ intelligence: 60, agentic: null }), "combined")).toBe(60);
+    expect(qualityFor(model({ intelligence: 60, agentic: 20 }), "combined")).toBe(40);
+    expect(qualityFor(model({ intelligence: null, agentic: null }), "combined")).toBeNull();
   });
 });
 
@@ -128,7 +124,7 @@ describe("scoreRows", () => {
   const options = { ...DEFAULT_SCORE_OPTIONS };
 
   it("computes raw, sub, and div calculated scores", () => {
-    const rows = [model({ intelligence: 60, coding: 40, totalCost: 100 })];
+    const rows = [model({ intelligence: 50, totalCost: 100 })];
 
     const raw = scoreRows(rows, { ...options, calc: "raw" }).rows[0];
     expect(raw.calculated).toBe(50);
@@ -145,8 +141,8 @@ describe("scoreRows", () => {
   it("derives value metrics and deltas against the top-quality model", () => {
     const result = scoreRows(
       [
-        model({ modelKey: "top", name: "Top", intelligence: 70, coding: 70, totalCost: 200 }),
-        model({ modelKey: "mid", name: "Mid", intelligence: 50, coding: 50, totalCost: 50 }),
+        model({ modelKey: "top", name: "Top", intelligence: 70, totalCost: 200 }),
+        model({ modelKey: "mid", name: "Mid", intelligence: 50, totalCost: 50 }),
       ],
       options,
     );
@@ -178,7 +174,6 @@ describe("scoreRows", () => {
       [
         model({ modelKey: "ok" }),
         model({ modelKey: "free", totalCost: 0 }),
-        model({ modelKey: "no-coding", coding: null }),
         model({ modelKey: "no-agentic", agentic: null }),
       ],
       { ...options, mode: "agentic" },
@@ -196,10 +191,10 @@ describe("scoreRows", () => {
   it("flags the Pareto frontier correctly", () => {
     const result = scoreRows(
       [
-        model({ modelKey: "cheap", intelligence: 50, coding: 50, totalCost: 1 }),
-        model({ modelKey: "worse-pricier", intelligence: 40, coding: 40, totalCost: 5 }),
-        model({ modelKey: "better-pricier", intelligence: 60, coding: 60, totalCost: 10 }),
-        model({ modelKey: "duplicate", intelligence: 60, coding: 60, totalCost: 10 }),
+        model({ modelKey: "cheap", intelligence: 50, totalCost: 1 }),
+        model({ modelKey: "worse-pricier", intelligence: 40, totalCost: 5 }),
+        model({ modelKey: "better-pricier", intelligence: 60, totalCost: 10 }),
+        model({ modelKey: "duplicate", intelligence: 60, totalCost: 10 }),
       ],
       options,
     );
@@ -215,8 +210,8 @@ describe("scoreRows", () => {
   it("returns only frontier rows when frontierOnly is set", () => {
     const result = scoreRows(
       [
-        model({ modelKey: "cheap", intelligence: 50, coding: 50, totalCost: 1 }),
-        model({ modelKey: "dominated", intelligence: 40, coding: 40, totalCost: 5 }),
+        model({ modelKey: "cheap", intelligence: 50, totalCost: 1 }),
+        model({ modelKey: "dominated", intelligence: 40, totalCost: 5 }),
       ],
       { ...options, frontierOnly: true },
     );
@@ -228,23 +223,21 @@ describe("scoreRows", () => {
   it("can compute the Pareto frontier by Time per Task", () => {
     const result = scoreRows(
       [
-        model({ modelKey: "fastest", intelligence: 40, coding: 40, totalCost: 10, timePerTask: 5 }),
-        model({ modelKey: "fast", intelligence: 60, coding: 60, totalCost: 20, timePerTask: 10 }),
+        model({ modelKey: "fastest", intelligence: 40, totalCost: 10, timePerTask: 5 }),
+        model({ modelKey: "fast", intelligence: 60, totalCost: 20, timePerTask: 10 }),
         model({
           modelKey: "dominated",
           intelligence: 50,
-          coding: 50,
           totalCost: 1,
           timePerTask: 50,
         }),
         model({
           modelKey: "slow-best",
           intelligence: 70,
-          coding: 70,
           totalCost: 2,
           timePerTask: 100,
         }),
-        model({ modelKey: "missing-time", intelligence: 80, coding: 80, totalCost: 3 }),
+        model({ modelKey: "missing-time", intelligence: 80, totalCost: 3 }),
       ],
       { ...options, frontierMetric: "time", frontierOnly: true, sort: "time" },
     );
@@ -260,7 +253,6 @@ describe("scoreRows", () => {
         totalCost: 5,
         timePerTask: 30,
         intelligence: 30,
-        coding: 30,
         releaseDate: "2025-01-01",
       }),
       model({
@@ -269,7 +261,6 @@ describe("scoreRows", () => {
         totalCost: 50,
         timePerTask: 10,
         intelligence: 70,
-        coding: 70,
         releaseDate: "2026-01-01",
       }),
       model({
@@ -278,7 +269,6 @@ describe("scoreRows", () => {
         totalCost: 1,
         timePerTask: 20,
         intelligence: 50,
-        coding: 50,
         releaseDate: null,
       }),
     ];

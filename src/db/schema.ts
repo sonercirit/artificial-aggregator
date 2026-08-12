@@ -84,7 +84,6 @@ export const modelResults = sqliteTable(
     answerCostPerTask: real("answer_cost_per_task"),
     timePerTask: real("time_per_task"),
     intelligence: real("intelligence"),
-    coding: real("coding"),
     agentic: real("agentic"),
     mmmu: real("mmmu"),
     priceInput1m: real("price_input_1m"),

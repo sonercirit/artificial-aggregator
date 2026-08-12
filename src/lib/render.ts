@@ -70,7 +70,7 @@ export function normalizeTheme(value: string | null | undefined): ThemeValue {
 const HELP = {
   theme: "Switch the UI color palette. Your selection is saved in this browser.",
   run: "Choose a stored fetch snapshot. Leave as latest to use the newest successful run with score/cost data.",
-  mode: "The quality dimension used for ranking: combined averages AA intelligence, coding, and agentic scores when available.",
+  mode: "The quality dimension used for ranking: combined averages AA intelligence and agentic scores when available.",
   calc: "How the final score is computed: raw ignores cost, sub subtracts a logarithmic Cost per Task penalty, and div divides quality by cost^power.",
   sort: "Column used to rank the comparison table and historic #1 winner timeline.",
   frontier:
@@ -330,7 +330,6 @@ export function renderModelTimeline(
         <td class="num">${formatTaskCost(row.costForScoring)}</td>
         <td class="num">${formatTaskTime(row.timePerTask)}</td>
         <td class="num">${fmt(row.intelligence, 1)}</td>
-        <td class="num">${fmt(row.coding, 1)}</td>
         <td class="num">${fmt(row.agentic, 1)}</td>
         <td class="num">${row.mmmu == null ? "-" : fmt(row.mmmu * 100, 1)}</td>
       </tr>`,
@@ -346,8 +345,8 @@ export function renderModelTimeline(
     </section>
     <section class="charts">${scoreChart}${costChart}${timeChart}</section>
     <div class="table-wrap" role="region" aria-label="Model timeline samples table" tabindex="0"><table class="timeline-table">
-      <thead><tr>${thTip("Run", "Fetch execution id for this sample.")}${thTip("Fetched", "When this sample was fetched.")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}${thTip("Quality", "Selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "AA weighted average Cost per Task in dollars. Falls back to legacy benchmark cost for older snapshots.", "num")}${thTip("Time/task", "AA weighted average Time per Task.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("MMMU%", "MMMU Pro score as a percentage when available.", "num")}</tr></thead>
-      <tbody>${tableRows || `<tr><td colspan="10" class="empty">No timeline samples for this model.</td></tr>`}</tbody>
+      <thead><tr>${thTip("Run", "Fetch execution id for this sample.")}${thTip("Fetched", "When this sample was fetched.")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}${thTip("Quality", "Selected quality metric before cost adjustment.", "num")}${thTip("Cost/task", "AA weighted average Cost per Task in dollars. Falls back to legacy benchmark cost for older snapshots.", "num")}${thTip("Time/task", "AA weighted average Time per Task.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("MMMU%", "MMMU Pro score as a percentage when available.", "num")}</tr></thead>
+      <tbody>${tableRows || `<tr><td colspan="9" class="empty">No timeline samples for this model.</td></tr>`}</tbody>
     </table></div>`,
     context,
   );
@@ -588,7 +587,6 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
         <td class="num">${fmt(row.quality, 1)}</td>
         <td class="num">${fmtDelta(row.deltaTop)}</td>
         <td class="num">${fmt(row.intelligence, 1)}</td>
-        <td class="num">${fmt(row.coding, 1)}</td>
         <td class="num">${fmt(row.agentic, 1)}</td>
         <td class="num">${fmt(row.costPenalty, 1)}</td>
         <td class="num strong">${fmt(row.calculated, options.calc === "div" ? 4 : 1)}</td>
@@ -609,12 +607,11 @@ function renderScoresTable(rows: ScoredRow[], options: ScoreOptions): string {
       <col class="delta-col">
       <col class="metric-col">
       <col class="metric-col">
-      <col class="metric-col">
       <col class="penalty-col">
       <col class="score-col">
     </colgroup>
-    <thead><tr>${thTip("#", "Rank after applying the selected sort.", "num")}${thTip("Pareto", "On the selected Pareto frontier: no lower-cost or faster model has a higher selected quality score.", "center")}${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Released", "Model release date reported by Artificial Analysis.")}${thTip("Cost/task", "AA weighted average Cost per Intelligence Index task in dollars. Lower is cheaper; legacy snapshots fall back to total benchmark cost.", "num")}${thTip("Time/task", "AA weighted average Time per Intelligence Index task. Lower is faster.", "num")}${thTip("$/Q", "Cost per selected quality point. Lower is better.", "num")}${thTip("Qual", "Selected quality metric before cost adjustment.", "num")}${thTip("ΔTop", "Quality gap versus the top-quality model in this run.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Code", "Artificial Analysis coding index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("Pen", "Cost penalty subtracted in sub scoring. Zero for raw/div scoring display still shows the computed penalty.", "num")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}</tr></thead>
-    <tbody>${tableRows || `<tr><td colspan="14" class="empty">No scored rows for these options.</td></tr>`}</tbody>
+    <thead><tr>${thTip("#", "Rank after applying the selected sort.", "num")}${thTip("Pareto", "On the selected Pareto frontier: no lower-cost or faster model has a higher selected quality score.", "center")}${thTip("Model", "Model name. Click to open its historic timeline.")}${thTip("Released", "Model release date reported by Artificial Analysis.")}${thTip("Cost/task", "AA weighted average Cost per Intelligence Index task in dollars. Lower is cheaper; legacy snapshots fall back to total benchmark cost.", "num")}${thTip("Time/task", "AA weighted average Time per Intelligence Index task. Lower is faster.", "num")}${thTip("$/Q", "Cost per selected quality point. Lower is better.", "num")}${thTip("Qual", "Selected quality metric before cost adjustment.", "num")}${thTip("ΔTop", "Quality gap versus the top-quality model in this run.", "num")}${thTip("Intel", "Artificial Analysis intelligence index.", "num")}${thTip("Agent", "Artificial Analysis agentic index when available.", "num")}${thTip("Pen", "Cost penalty subtracted in sub scoring. Zero for raw/div scoring display still shows the computed penalty.", "num")}${thTip("Score", "Final calculated score for the selected mode and cost formula.", "num")}</tr></thead>
+    <tbody>${tableRows || `<tr><td colspan="13" class="empty">No scored rows for these options.</td></tr>`}</tbody>
   </table></div>`;
 }
 

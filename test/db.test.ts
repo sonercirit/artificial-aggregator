@@ -29,7 +29,7 @@ describe("model result storage", () => {
 
     const stored = await storeModelResults(env, 1, [
       model({ modelKey: "scoreable", rawResultJson: '{"kept":true}' }),
-      model({ modelKey: "no-code", coding: null, rawResultJson: '{"kept":false}' }),
+      model({ modelKey: "no-intel", intelligence: null, rawResultJson: '{"kept":false}' }),
       model({ modelKey: "no-cost", costPerTask: null, totalCost: null }),
     ]);
 
@@ -78,7 +78,11 @@ describe("storage maintenance", () => {
   it("deletes one complete old snapshot before row-level cleanup", async () => {
     for (let id = 1; id <= 4; id++) {
       await insertRun(db, id, "success", 1, `2026-01-0${id}T00:00:00.000Z`);
-      await insertRow(db, id, model({ modelKey: `model-${id}`, coding: id === 2 ? null : 40 }));
+      await insertRow(
+        db,
+        id,
+        model({ modelKey: `model-${id}`, intelligence: id === 2 ? null : 50 }),
+      );
     }
 
     const result = await pruneStoredRunData(env, {
@@ -103,7 +107,7 @@ describe("storage maintenance", () => {
     await insertRun(db, 2, "error", 0, "2026-01-02T00:00:00.000Z");
     await insertRun(db, 3, "success", 1, "2026-01-03T00:00:00.000Z");
     await insertRow(db, 1, model({ modelKey: "old-scoreable", rawResultJson: '{"old":1}' }));
-    await insertRow(db, 1, model({ modelKey: "old-unscoreable", coding: null }));
+    await insertRow(db, 1, model({ modelKey: "old-unscoreable", intelligence: null }));
     await insertRow(db, 2, model({ modelKey: "partial" }));
     await insertRow(db, 3, model({ modelKey: "new-scoreable", rawResultJson: '{"new":1}' }));
 
@@ -164,6 +168,7 @@ async function applyMigrations(database: D1Database): Promise<void> {
   for (const path of [
     "../drizzle/0000_bright_spitfire.sql",
     "../drizzle/0001_grey_jack_flag.sql",
+    "../drizzle/0002_nifty_invisible_woman.sql",
   ]) {
     const sql = await readText(new URL(path, import.meta.url));
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -203,8 +208,8 @@ async function insertRow(
   await database
     .prepare(
       `INSERT INTO model_results
-       (run_id, model_key, name, total_cost, cost_per_task, intelligence, coding, raw_result_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (run_id, model_key, name, total_cost, cost_per_task, intelligence, raw_result_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       runId,
@@ -213,7 +218,6 @@ async function insertRow(
       result.totalCost,
       result.costPerTask,
       result.intelligence,
-      result.coding,
       result.rawResultJson,
     )
     .run();
@@ -249,7 +253,6 @@ function model(overrides: Partial<ParsedModelResult> = {}): ParsedModelResult {
     answerCostPerTask: null,
     timePerTask: null,
     intelligence: 50,
-    coding: 40,
     agentic: null,
     mmmu: null,
     priceInput1m: null,

@@ -38,7 +38,6 @@ const FULL_MODEL = {
   release_date: "2026-01-15",
   knowledge_cutoff_date: "2025-10-01",
   intelligence_index: 62.5,
-  coding_index: 58.1,
   agentic_index: 49.7,
   mmmu_pro: 0.71,
   intelligence_index_cost: {
@@ -70,7 +69,6 @@ const BUDGET_MODEL = {
   slug: "budget-1",
   name: "Budget One",
   intelligence_index: 41,
-  coding_index: 38,
   intelligence_index_cost: { total_cost: 12.5 },
   intelligenceIndexCostPerTask: { cost: { total: 0.0125 } },
   intelligenceIndexTimePerTask: 45,
@@ -105,7 +103,6 @@ describe("parseHtmlToResults", () => {
     expect(gold.answerCostPerTask).toBe(0.1);
     expect(gold.timePerTask).toBe(123.45);
     expect(gold.intelligence).toBe(62.5);
-    expect(gold.coding).toBe(58.1);
     expect(gold.agentic).toBe(49.7);
     expect(gold.mmmu).toBe(0.71);
     expect(gold.priceInput1m).toBe(2.5);
@@ -129,7 +126,6 @@ describe("parseHtmlToResults", () => {
             releaseDate: "2025-12-01",
             knowledgeCutoffDate: "2025-09-01",
             intelligenceIndex: 55,
-            codingIndex: 51,
             agenticIndex: 47,
             mmmuPro: 0.6,
             intelligenceIndexCost: { totalCost: 99.9, inputCost: 10 },
@@ -153,7 +149,6 @@ describe("parseHtmlToResults", () => {
     expect(camel.releaseDate).toBe("2025-12-01");
     expect(camel.cutoffDate).toBe("2025-09-01");
     expect(camel.intelligence).toBe(55);
-    expect(camel.coding).toBe(51);
     expect(camel.agentic).toBe(47);
     expect(camel.mmmu).toBe(0.6);
     expect(camel.totalCost).toBe(99.9);
@@ -259,7 +254,6 @@ describe("parseHtmlToResults", () => {
             slug: "init-1",
             name: "Init One",
             intelligenceIndex: 41,
-            codingIndex: 38,
             intelligenceIndexCost: { total: 12.5, input: 2, output: 10, reasoning: 1, answer: 1 },
             intelligenceIndexCostPerTask: {
               cost: {
@@ -360,7 +354,6 @@ describe("encrypted manifests", () => {
           slug: "manifest-1",
           name: "Manifest One",
           intelligenceIndex: 40,
-          codingIndex: 35,
           intelligenceIndexCost: { total: 20 },
           intelligenceIndexCostPerTask: { cost: { total: 0.02 } },
           intelligenceIndexTimePerTask: 9,
@@ -385,7 +378,6 @@ describe("encrypted manifests", () => {
           name: "Manifest One",
           shortName: "M1",
           intelligenceIndex: 40,
-          codingIndex: 35,
           agenticIndex: 20,
           mmmuPro: 0.5,
           intelligenceIndexCost: {
@@ -430,7 +422,6 @@ describe("encrypted manifests", () => {
     const model = results[0];
     expect(model.modelKey).toBe("manifest-1");
     expect(model.intelligence).toBe(40);
-    expect(model.coding).toBe(35);
     expect(model.agentic).toBe(20);
     expect(model.mmmu).toBe(0.5);
     expect(model.totalCost).toBe(20);
@@ -444,6 +435,22 @@ describe("encrypted manifests", () => {
     expect(model.creatorName).toBe("Acme");
     expect(model.isOpenWeights).toBe(true);
     expect(model.isReasoning).toBe(true);
+  });
+
+  it("throws instead of falling back to the embedded preview when no manifest loads", async () => {
+    const html = flightHtml(
+      JSON.stringify({
+        initialModels: [BUDGET_MODEL],
+        manifest: { path: "/data/models.txt", key: MANIFEST_KEY },
+      }),
+    );
+
+    await expect(
+      parseHtmlToResults(html, {
+        resolveUrl: (path) => `https://example.test${path}`,
+        fetchBinary: async () => encryptManifest({ models: [] }, `f${MANIFEST_KEY.slice(1)}`),
+      }),
+    ).rejects.toThrow(/Could not load any Artificial Analysis manifest/);
   });
 });
 
@@ -492,7 +499,6 @@ describe("isScoreable", () => {
     answerCostPerTask: null,
     timePerTask: null,
     intelligence: 50,
-    coding: 40,
     agentic: null,
     mmmu: null,
     priceInput1m: null,
@@ -503,7 +509,7 @@ describe("isScoreable", () => {
     rawResultJson: "{}",
   };
 
-  it("requires a positive ranking cost plus intelligence and coding", () => {
+  it("requires a positive ranking cost plus intelligence", () => {
     expect(isScoreable(base)).toBe(true);
     expect(costForRanking({ ...base, costPerTask: 0.25 })).toBe(0.25);
     expect(isScoreable({ ...base, totalCost: null, costPerTask: 0.25 })).toBe(true);
@@ -511,7 +517,6 @@ describe("isScoreable", () => {
     expect(isScoreable({ ...base, totalCost: 0 })).toBe(false);
     expect(isScoreable({ ...base, totalCost: null })).toBe(false);
     expect(isScoreable({ ...base, intelligence: null })).toBe(false);
-    expect(isScoreable({ ...base, coding: null })).toBe(false);
     expect(isScoreable({ ...base, agentic: null, mmmu: null })).toBe(true);
   });
 });

@@ -6,7 +6,7 @@
 import type { ParsedModelResult } from "./aa";
 import { costForRanking, isScoreable } from "./aa";
 
-export const MODES = ["combined", "coding", "intelligence", "agentic", "mmmu"] as const;
+export const MODES = ["combined", "intelligence", "agentic", "mmmu"] as const;
 export type Mode = (typeof MODES)[number];
 
 export const CALCS = ["raw", "sub", "div"] as const;
@@ -23,7 +23,6 @@ export const SORT_KEYS = [
   "cost",
   "time",
   "intel",
-  "coding",
   "agentic",
   "mmmu",
   "released",
@@ -44,7 +43,7 @@ export type ScoreOptions = {
 };
 
 export const DEFAULT_SCORE_OPTIONS: ScoreOptions = {
-  mode: "combined",
+  mode: "intelligence",
   calc: "raw",
   costWeight: 10,
   costFloor: 0.01,
@@ -215,17 +214,13 @@ function limitParam(params: URLSearchParams): number {
 /** The selected quality metric, or null when the row lacks the data for it. */
 export function qualityFor(result: ParsedModelResult, mode: Mode): number | null {
   if (mode === "intelligence") return numberOrNull(result.intelligence);
-  if (mode === "coding") return numberOrNull(result.coding);
   if (mode === "agentic") return numberOrNull(result.agentic);
   if (mode === "mmmu") {
     const mmmu = numberOrNull(result.mmmu);
     return mmmu == null ? null : mmmu * 100;
   }
 
-  const parts = [result.intelligence, result.coding].map(numberOrNull).filter(isNotNull);
-  const agentic = numberOrNull(result.agentic);
-  if (agentic != null) parts.push(agentic);
-
+  const parts = [result.intelligence, result.agentic].map(numberOrNull).filter(isNotNull);
   if (parts.length === 0) return null;
   return parts.reduce((sum, value) => sum + value, 0) / parts.length;
 }
@@ -242,7 +237,7 @@ export function scoreRows<T extends ParsedModelResult>(
   options: ScoreOptions,
 ): ScoreResult<T> {
   // Rows must have the selected quality metric and pass the scoreable
-  // predicate (positive Cost per Task/legacy cost, intelligence and coding present).
+  // predicate (positive Cost per Task/legacy cost and intelligence present).
   const entries: Array<ScoreableEntry<T>> = [];
   for (const result of results) {
     const quality = qualityFor(result, options.mode);
@@ -342,7 +337,6 @@ function sortRows<T extends ParsedModelResult>(
     cost: (row) => row.costForScoring,
     time: (row) => row.timePerTask,
     intel: (row) => row.intelligence,
-    coding: (row) => row.coding,
     agentic: (row) => row.agentic,
     mmmu: (row) => (row.mmmu == null ? null : row.mmmu * 100),
     released: (row) => row.releaseDate,

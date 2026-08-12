@@ -54,7 +54,6 @@ export type ModelResultRow = {
   answer_cost_per_task: number | null;
   time_per_task: number | null;
   intelligence: number | null;
-  coding: number | null;
   agentic: number | null;
   mmmu: number | null;
   price_input_1m: number | null;
@@ -87,14 +86,12 @@ export type TimelineRun = {
 
 /** SQL mirror of isScoreable() in aa.ts; expects model_results aliased as mr. */
 const SCOREABLE_SQL = `COALESCE(mr.cost_per_task, mr.total_cost) > 0
-           AND mr.intelligence IS NOT NULL
-           AND mr.coding IS NOT NULL`;
+           AND mr.intelligence IS NOT NULL`;
 
 /** Explicit inverse of SCOREABLE_SQL (NOT would not match SQL NULL values). */
 const UNSCOREABLE_SQL = `(COALESCE(mr.cost_per_task, mr.total_cost) IS NULL
            OR COALESCE(mr.cost_per_task, mr.total_cost) <= 0
-           OR mr.intelligence IS NULL
-           OR mr.coding IS NULL)`;
+           OR mr.intelligence IS NULL)`;
 
 const DEFAULT_KEEP_RUNS = 900;
 const DEFAULT_KEEP_RAW_RUNS = 72;
@@ -374,13 +371,12 @@ export async function storeModelResults(
         total_cost, input_cost, output_cost, reasoning_cost, answer_cost,
         cost_per_task, input_cost_per_task, output_cost_per_task,
         reasoning_cost_per_task, answer_cost_per_task, time_per_task,
-        intelligence, coding, agentic, mmmu, price_input_1m, price_output_1m,
+        intelligence, agentic, mmmu, price_input_1m, price_output_1m,
         active_params, is_open_weights, is_reasoning, raw_result_json
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(run_id, model_key) DO UPDATE SET
         source_id = excluded.source_id,
@@ -403,7 +399,6 @@ export async function storeModelResults(
         answer_cost_per_task = excluded.answer_cost_per_task,
         time_per_task = excluded.time_per_task,
         intelligence = excluded.intelligence,
-        coding = excluded.coding,
         agentic = excluded.agentic,
         mmmu = excluded.mmmu,
         price_input_1m = excluded.price_input_1m,
@@ -435,7 +430,6 @@ export async function storeModelResults(
       result.answerCostPerTask,
       result.timePerTask,
       result.intelligence,
-      result.coding,
       result.agentic,
       result.mmmu,
       result.priceInput1m,
@@ -775,7 +769,6 @@ export async function getTimelineResultsForRuns(
         mr.cost_per_task,
         mr.time_per_task,
         mr.intelligence,
-        mr.coding,
         mr.agentic,
         mr.mmmu,
         fr.id AS timeline_run_id,
@@ -814,7 +807,6 @@ type ScoreModelResultRow = {
   cost_per_task: number | null;
   time_per_task: number | null;
   intelligence: number | null;
-  coding: number | null;
   agentic: number | null;
   mmmu: number | null;
 };
@@ -842,7 +834,6 @@ function rowToModelResult(row: ModelResultRow): ParsedModelResult {
     answerCostPerTask: row.answer_cost_per_task,
     timePerTask: row.time_per_task,
     intelligence: row.intelligence,
-    coding: row.coding,
     agentic: row.agentic,
     mmmu: row.mmmu,
     priceInput1m: row.price_input_1m,
@@ -887,7 +878,6 @@ function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): T
     answerCostPerTask: null,
     timePerTask: row.time_per_task,
     intelligence: row.intelligence,
-    coding: row.coding,
     agentic: row.agentic,
     mmmu: row.mmmu,
     priceInput1m: null,

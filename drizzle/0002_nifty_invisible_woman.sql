@@ -1,0 +1,1 @@
+ALTER TABLE `model_results` DROP COLUMN `coding`;

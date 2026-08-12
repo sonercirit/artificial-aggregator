@@ -14,7 +14,7 @@
 export const ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/models";
 
 /** Stored with every run; bump when the extraction/normalization rules change. */
-export const PARSER_VERSION = "aa-next-rsc-manifest-aes-gcm-v4";
+export const PARSER_VERSION = "aa-next-rsc-manifest-aes-gcm-v5";
 
 export type ParsedModelResult = {
   modelKey: string;
@@ -39,7 +39,6 @@ export type ParsedModelResult = {
   /** Seconds per Intelligence Index task. */
   timePerTask: number | null;
   intelligence: number | null;
-  coding: number | null;
   agentic: number | null;
   mmmu: number | null;
   priceInput1m: number | null;
@@ -72,12 +71,12 @@ export function costForRanking(result: ParsedModelResult): number | null {
 
 /**
  * A result that can participate in score/cost ranking. The same predicate is
- * mirrored in SQL by db.ts (COALESCE(cost_per_task, total_cost) > 0,
- * intelligence and coding present).
+ * mirrored in SQL by db.ts (COALESCE(cost_per_task, total_cost) > 0 and
+ * intelligence present).
  */
 export function isScoreable(result: ParsedModelResult): boolean {
   const cost = costForRanking(result);
-  return cost != null && cost > 0 && isNumber(result.intelligence) && isNumber(result.coding);
+  return cost != null && cost > 0 && isNumber(result.intelligence);
 }
 
 /**
@@ -95,14 +94,25 @@ export async function parseHtmlToResults(
 
   if (options.fetchBinary) {
     const manifests = extractManifestsFromHtml(html);
+    let loaded = 0;
+    let lastError = "";
+
     for (const manifest of manifests) {
       try {
         const models = await loadManifestModels(manifest, options);
         if (models.length > 0) candidates.push(models);
+        loaded++;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`Could not load Artificial Analysis manifest ${manifest.path}: ${message}`);
+        lastError = error instanceof Error ? error.message : String(error);
+        console.warn(`Could not load Artificial Analysis manifest ${manifest.path}: ${lastError}`);
       }
+    }
+
+    // Manifest keys rotate, so a stored snapshot re-parsed later cannot
+    // decrypt them. Falling back to the page's short embedded preview would
+    // record a truncated model list as a complete snapshot.
+    if (manifests.length > 0 && loaded === 0) {
+      throw new Error(`Could not load any Artificial Analysis manifest: ${lastError}`);
     }
   }
 
@@ -362,8 +372,6 @@ function hasModelScoreFields(input: unknown): boolean {
   return (
     numberOrNull(model.intelligence_index) != null ||
     numberOrNull(model.intelligenceIndex) != null ||
-    numberOrNull(model.coding_index) != null ||
-    numberOrNull(model.codingIndex) != null ||
     numberOrNull(cost.total) != null ||
     numberOrNull(cost.total_cost) != null ||
     numberOrNull(cost.totalCost) != null ||
@@ -445,7 +453,6 @@ function normalizeModel(input: unknown): ParsedModelResult {
     numberOrNull(model.intelligenceIndexTimePerTask);
   const intelligence =
     numberOrNull(model.intelligence_index) ?? numberOrNull(model.intelligenceIndex);
-  const coding = numberOrNull(model.coding_index) ?? numberOrNull(model.codingIndex);
   const agentic = numberOrNull(model.agentic_index) ?? numberOrNull(model.agenticIndex);
   const mmmu = numberOrNull(model.mmmu_pro) ?? numberOrNull(model.mmmuPro);
   const priceInput1m =
@@ -476,7 +483,6 @@ function normalizeModel(input: unknown): ParsedModelResult {
     release_date: releaseDate,
     knowledge_cutoff_date: cutoffDate,
     intelligence_index: intelligence,
-    coding_index: coding,
     agentic_index: agentic,
     mmmu_pro: mmmu,
     intelligence_index_cost: cost,
@@ -511,7 +517,6 @@ function normalizeModel(input: unknown): ParsedModelResult {
     answerCostPerTask,
     timePerTask,
     intelligence,
-    coding,
     agentic,
     mmmu,
     priceInput1m,
