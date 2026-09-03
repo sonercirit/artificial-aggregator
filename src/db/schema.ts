@@ -30,6 +30,7 @@ export const fetchRuns = sqliteTable(
     parserVersion: text("parser_version").notNull(),
     modelCount: integer("model_count").notNull().default(0),
     resultCount: integer("result_count").notNull().default(0),
+    defaultWinnerModelKey: text("default_winner_model_key"),
     error: text("error"),
   },
   (table) => ({
@@ -101,5 +102,13 @@ export const modelResults = sqliteTable(
     runIdx: index("model_results_run_idx").on(table.runId),
     modelIdx: index("model_results_model_idx").on(table.modelKey),
     nameIdx: index("model_results_name_idx").on(table.name),
+    unscoreableCleanupIdx: index("model_results_unscoreable_cleanup_idx")
+      .on(table.runId, table.id)
+      .where(
+        sql`COALESCE(${table.costPerTask}, ${table.totalCost}) IS NULL OR COALESCE(${table.costPerTask}, ${table.totalCost}) <= 0 OR ${table.intelligence} IS NULL`,
+      ),
+    rawJsonCleanupIdx: index("model_results_raw_json_cleanup_idx")
+      .on(table.runId, table.id)
+      .where(sql`${table.rawResultJson} <> '{}'`),
   }),
 );

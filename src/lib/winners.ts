@@ -4,7 +4,11 @@
  */
 
 import type { TimelineResult } from "./db";
-import { getSuccessfulTimelineRuns, getTimelineResultsForRuns } from "./db";
+import {
+  getDefaultWinnerTimeline,
+  getSuccessfulTimelineRuns,
+  getTimelineResultsForRuns,
+} from "./db";
 import type { ScoreOptions, ScoredRow } from "./scoring";
 import { compareByRunTime, scoreRows } from "./scoring";
 import type { Bindings } from "../types";
@@ -17,6 +21,11 @@ export async function getWinnerTimeline(
   options: ScoreOptions,
   runLimit: number,
 ): Promise<Array<ScoredRow<TimelineResult>>> {
+  if (usesPrecomputedDefaultWinner(options)) {
+    const results = await getDefaultWinnerTimeline(env, runLimit);
+    return winnerPerRun(results, options).sort(compareByRunTime);
+  }
+
   const runs = await getSuccessfulTimelineRuns(env, runLimit);
   const winners: Array<ScoredRow<TimelineResult>> = [];
 
@@ -27,6 +36,16 @@ export async function getWinnerTimeline(
   }
 
   return winners.sort(compareByRunTime);
+}
+
+/** The persisted key is specifically the winner for the site's default view. */
+function usesPrecomputedDefaultWinner(options: ScoreOptions): boolean {
+  return (
+    options.mode === "intelligence" &&
+    options.calc === "raw" &&
+    options.sort === "score" &&
+    !options.frontierOnly
+  );
 }
 
 function winnerPerRun(

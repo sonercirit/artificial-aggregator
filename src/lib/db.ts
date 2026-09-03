@@ -26,6 +26,7 @@ export type FetchRun = {
   parser_version: string;
   model_count: number;
   result_count: number;
+  default_winner_model_key: string | null;
   error: string | null;
 };
 
@@ -194,6 +195,14 @@ export async function completeFetchRun(
          html_gzip_bytes = ?,
          model_count = ?,
          result_count = ?,
+         default_winner_model_key = (
+           SELECT mr.model_key
+           FROM model_results mr
+           WHERE mr.run_id = ?
+             AND ${SCOREABLE_SQL}
+           ORDER BY mr.intelligence DESC, LOWER(mr.name) ASC, mr.id ASC
+           LIMIT 1
+         ),
          error = NULL
      WHERE id = ?`,
   )
@@ -206,6 +215,7 @@ export async function completeFetchRun(
       input.htmlGzipBytes,
       input.modelCount,
       input.resultCount,
+      runId,
       runId,
     )
     .run();
@@ -565,6 +575,8 @@ export async function pruneStoredRunData(
   // Deletes release whole SQLite pages that can be reused even when the D1
   // file is already at its hard size limit. Start with legacy catalog rows;
   // unlike shrinking TEXT in-place, this creates room for the next snapshot.
+  // The matching sparse partial index makes an empty-backlog pass read zero
+  // model rows instead of scanning the entire history every hour.
   const deletedUnscoreableResults = await runLimitedModelMutation(
     env,
     `DELETE FROM model_results
@@ -603,7 +615,8 @@ export async function pruneStoredRunData(
   modelRowsRemaining -= deletedIncompleteResults;
 
   // Compact legacy scoreable payloads after page-releasing work. New rows no
-  // longer store this duplicate JSON, so this backlog only decreases.
+  // longer store this duplicate JSON, so this backlog only decreases. Its
+  // sparse partial index likewise makes completed cleanup cheap to recheck.
   const prunedRawResultJson = await runLimitedModelMutation(
     env,
     `UPDATE model_results
@@ -658,11 +671,7 @@ export async function getLatestSuccessfulRun(env: Bindings): Promise<FetchRun | 
   return env.DB.prepare(
     `SELECT * FROM fetch_runs
      WHERE status = 'success'
-       AND EXISTS (
-         SELECT 1 FROM model_results mr
-         WHERE mr.run_id = fetch_runs.id
-           AND ${SCOREABLE_SQL}
-       )
+       AND default_winner_model_key IS NOT NULL
      ORDER BY completed_at DESC, id DESC
      LIMIT 1`,
   ).first<FetchRun>();
@@ -731,11 +740,7 @@ export async function getSuccessfulTimelineRuns(
     `SELECT fr.id, fr.started_at, fr.completed_at
      FROM fetch_runs fr
      WHERE fr.status = 'success'
-       AND EXISTS (
-         SELECT 1 FROM model_results mr
-         WHERE mr.run_id = fr.id
-           AND ${SCOREABLE_SQL}
-       )
+       AND fr.default_winner_model_key IS NOT NULL
      ORDER BY fr.completed_at DESC, fr.id DESC
      LIMIT ?`,
   )
@@ -743,6 +748,46 @@ export async function getSuccessfulTimelineRuns(
     .all<TimelineRun>();
 
   return results;
+}
+
+/**
+ * Precomputed winners for the default intelligence/raw/score view. Keeping the
+ * winning model key on each run turns the home page's usual 500-run history
+ * from a scan of every model snapshot into indexed point lookups.
+ */
+export async function getDefaultWinnerTimeline(
+  env: Bindings,
+  limit = 500,
+): Promise<TimelineResult[]> {
+  const { results = [] } = await env.DB.prepare(
+    `SELECT
+        mr.run_id,
+        mr.model_key,
+        mr.name,
+        mr.creator_name,
+        mr.release_date,
+        mr.total_cost,
+        mr.cost_per_task,
+        mr.time_per_task,
+        mr.intelligence,
+        mr.agentic,
+        mr.mmmu,
+        fr.id AS timeline_run_id,
+        fr.started_at AS timeline_started_at,
+        fr.completed_at AS timeline_completed_at
+     FROM fetch_runs fr
+     JOIN model_results mr
+       ON mr.run_id = fr.id
+      AND mr.model_key = fr.default_winner_model_key
+     WHERE fr.status = 'success'
+       AND fr.default_winner_model_key IS NOT NULL
+     ORDER BY fr.completed_at DESC, fr.id DESC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<ScoreModelResultRow & TimelineColumns>();
+
+  return results.map(rowToScoreTimelineResult);
 }
 
 /**

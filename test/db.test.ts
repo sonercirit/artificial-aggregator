@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import type { ParsedModelResult } from "../src/lib/aa";
-import { getRepairableRawRuns, pruneStoredRunData, storeModelResults } from "../src/lib/db";
+import {
+  completeFetchRun,
+  getDefaultWinnerTimeline,
+  getRepairableRawRuns,
+  pruneStoredRunData,
+  storeModelResults,
+} from "../src/lib/db";
+import { DEFAULT_SCORE_OPTIONS } from "../src/lib/scoring";
+import { getWinnerTimeline } from "../src/lib/winners";
 import type { Bindings } from "../src/types";
 
 let miniflare: Miniflare;
@@ -40,6 +48,55 @@ describe("model result storage", () => {
     expect(results).toEqual([{ model_key: "scoreable", raw_result_json: "{}" }]);
   });
 
+  it("records the default winner when a run completes", async () => {
+    await insertRun(db, 1, "error", 2);
+    await insertRow(
+      db,
+      1,
+      model({ modelKey: "budget", name: "Budget", intelligence: 40, costPerTask: 0.01 }),
+    );
+    await insertRow(
+      db,
+      1,
+      model({ modelKey: "quality", name: "Quality", intelligence: 70, costPerTask: 1 }),
+    );
+
+    await completeFetchRun(env, 1, {
+      durationMs: 10,
+      httpStatus: 200,
+      htmlBytes: 100,
+      htmlSha256: "hash",
+      htmlGzipBytes: 50,
+      modelCount: 2,
+      resultCount: 2,
+      completedAt: "2026-01-01T00:01:00.000Z",
+    });
+
+    const run = await db
+      .prepare("SELECT default_winner_model_key FROM fetch_runs WHERE id = 1")
+      .first<{ default_winner_model_key: string | null }>();
+    expect(run?.default_winner_model_key).toBe("quality");
+
+    const timeline = await getDefaultWinnerTimeline(env, 10);
+    expect(timeline.map((row) => [row.runId, row.modelKey])).toEqual([[1, "quality"]]);
+
+    const queries: string[] = [];
+    const trackingDb = {
+      prepare(query: string) {
+        queries.push(query);
+        return db.prepare(query);
+      },
+    } as D1Database;
+    const winners = await getWinnerTimeline(
+      { DB: trackingDb } as Bindings,
+      DEFAULT_SCORE_OPTIONS,
+      10,
+    );
+    expect(winners.map((row) => row.modelKey)).toEqual(["quality"]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("mr.model_key = fr.default_winner_model_key");
+  });
+
   it("removes earlier batches when a later model batch fails", async () => {
     let deleteCalls = 0;
     let batchCalls = 0;
@@ -75,6 +132,36 @@ describe("model result storage", () => {
 });
 
 describe("storage maintenance", () => {
+  it("uses sparse partial indexes for legacy cleanup", async () => {
+    const unscoreablePlan = await explainQueryPlan(
+      db,
+      `SELECT mr.id
+       FROM model_results mr
+       WHERE EXISTS (
+         SELECT 1 FROM fetch_runs fr
+         WHERE fr.id = mr.run_id AND fr.status IN ('success', 'error')
+       )
+         AND (COALESCE(mr.cost_per_task, mr.total_cost) IS NULL
+           OR COALESCE(mr.cost_per_task, mr.total_cost) <= 0
+           OR mr.intelligence IS NULL)
+       ORDER BY mr.run_id ASC, mr.id ASC
+       LIMIT 600`,
+    );
+    const rawJsonPlan = await explainQueryPlan(
+      db,
+      `SELECT mr.id
+       FROM model_results mr
+       WHERE mr.raw_result_json <> '{}'
+         AND COALESCE(mr.cost_per_task, mr.total_cost) > 0
+         AND mr.intelligence IS NOT NULL
+       ORDER BY mr.run_id ASC, mr.id ASC
+       LIMIT 600`,
+    );
+
+    expect(unscoreablePlan).toContain("model_results_unscoreable_cleanup_idx");
+    expect(rawJsonPlan).toContain("model_results_raw_json_cleanup_idx");
+  });
+
   it("deletes one complete old snapshot before row-level cleanup", async () => {
     for (let id = 1; id <= 4; id++) {
       await insertRun(db, id, "success", 1, `2026-01-0${id}T00:00:00.000Z`);
@@ -169,6 +256,7 @@ async function applyMigrations(database: D1Database): Promise<void> {
     "../drizzle/0000_bright_spitfire.sql",
     "../drizzle/0001_grey_jack_flag.sql",
     "../drizzle/0002_nifty_invisible_woman.sql",
+    "../drizzle/0003_tan_toxin.sql",
   ]) {
     const sql = await readText(new URL(path, import.meta.url));
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -228,6 +316,13 @@ async function storedKeys(database: D1Database): Promise<[string, string][]> {
     .prepare("SELECT model_key, raw_result_json FROM model_results ORDER BY id")
     .all<{ model_key: string; raw_result_json: string }>();
   return results.map((row) => [row.model_key, row.raw_result_json]);
+}
+
+async function explainQueryPlan(database: D1Database, query: string): Promise<string> {
+  const { results } = await database
+    .prepare(`EXPLAIN QUERY PLAN ${query}`)
+    .all<{ detail: string }>();
+  return results.map((row) => row.detail).join("\n");
 }
 
 function model(overrides: Partial<ParsedModelResult> = {}): ParsedModelResult {
