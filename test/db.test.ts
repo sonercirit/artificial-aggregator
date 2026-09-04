@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installReadCache } from "./helpers/cache";
 import { Miniflare } from "miniflare";
 import type { ParsedModelResult } from "../src/lib/aa";
 import {
   completeFetchRun,
   getDefaultWinnerTimeline,
+  getModelSummaries,
   getRepairableRawRuns,
   pruneStoredRunData,
   storeModelResults,
@@ -28,6 +30,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await miniflare.dispose();
 });
 
@@ -128,6 +131,85 @@ describe("model result storage", () => {
     );
     expect(batchCalls).toBe(2);
     expect(deleteCalls).toBe(2); // initial replacement + failure cleanup
+  });
+});
+
+describe("cached history reads", () => {
+  it("shares snapshots across scoring options and only reloads changed boundary batches", async () => {
+    const { advance } = installReadCache();
+    const statements = Array.from({ length: 105 }, (_, index) => {
+      const id = index + 1;
+      return [
+        db
+          .prepare(
+            `INSERT INTO fetch_runs
+           (id, source_url, status, started_at, completed_at, parser_version, default_winner_model_key)
+           VALUES (?, 'test', 'success', '2026-01-01', '2026-01-01', 'test', 'quality')`,
+          )
+          .bind(id),
+        db
+          .prepare(
+            `INSERT INTO model_results
+           (run_id, model_key, name, cost_per_task, intelligence, raw_result_json)
+           VALUES (?, 'quality', 'Quality', 1, 70, '{}'),
+                  (?, 'budget', 'Budget', 0.01, 40, '{}')`,
+          )
+          .bind(id, id),
+      ];
+    }).flat();
+    await db.batch(statements);
+
+    const queries: string[] = [];
+    const trackingEnv = {
+      DB: {
+        prepare(query: string) {
+          queries.push(query);
+          return db.prepare(query);
+        },
+      },
+    } as Bindings;
+    const valueOptions = { ...DEFAULT_SCORE_OPTIONS, calc: "div" as const };
+    const qualityOptions = { ...DEFAULT_SCORE_OPTIONS, calc: "sub" as const, costWeight: 0 };
+
+    const value = await getWinnerTimeline(trackingEnv, valueOptions, 100);
+    expect(value).toHaveLength(100);
+    expect(value.every((row) => row.modelKey === "budget")).toBe(true);
+    expect(queries).toHaveLength(4); // run list + three stable id buckets
+
+    const quality = await getWinnerTimeline(trackingEnv, qualityOptions, 100);
+    expect(quality).toHaveLength(100);
+    expect(quality.every((row) => row.modelKey === "quality")).toBe(true);
+    expect(queries).toHaveLength(4); // different scoring, zero additional D1 reads
+
+    await insertRun(db, 106, "success");
+    await insertRow(db, 106, model({ modelKey: "new", intelligence: 80 }));
+    await db
+      .prepare(
+        `UPDATE fetch_runs SET completed_at = '2026-01-02', default_winner_model_key = 'new' WHERE id = 106`,
+      )
+      .run();
+    advance(61); // refresh run list; immutable snapshot data stays cached
+    queries.length = 0;
+    const updated = await getWinnerTimeline(trackingEnv, valueOptions, 100);
+    expect(updated).toHaveLength(100);
+    expect(updated.at(-1)?.modelKey).toBe("new");
+    expect(updated.some((row) => row.runId === 6)).toBe(false);
+    expect(queries).toHaveLength(3); // list + oldest/newest boundary, not the middle
+
+    // Pruned runs must disappear even while their snapshot data is cached.
+    await db.prepare("DELETE FROM fetch_runs WHERE id = 60").run();
+    advance(61);
+    const pruned = await getWinnerTimeline(trackingEnv, valueOptions, 100);
+    expect(pruned.some((row) => row.runId === 60)).toBe(false);
+
+    queries.length = 0;
+    const summaries = await getModelSummaries(trackingEnv);
+    expect(summaries.find((row) => row.model_key === "quality")?.samples).toBe(104);
+    expect(await getModelSummaries(trackingEnv)).toEqual(summaries);
+    expect(queries).toHaveLength(4); // run list + three summary buckets, then cache hit
+    advance(3600);
+    await getModelSummaries(trackingEnv);
+    expect(queries).toHaveLength(5); // only run list; no hourly full-history scan
   });
 });
 

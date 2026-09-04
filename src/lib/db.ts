@@ -7,6 +7,7 @@
 import type { ParsedModelResult } from "./aa";
 import { isScoreable, PARSER_VERSION } from "./aa";
 import type { Bindings } from "../types";
+import { cachedRead } from "./cache";
 
 export type FetchRunStatus = "running" | "success" | "error" | "skipped";
 
@@ -657,54 +658,73 @@ export async function getRun(env: Bindings, runId: number): Promise<FetchRun | n
 }
 
 export async function getRuns(env: Bindings, limit = 100): Promise<FetchRun[]> {
-  const { results = [] } = await env.DB.prepare(
+  return readRows<FetchRun>(
+    env,
     `SELECT * FROM fetch_runs
      ORDER BY started_at DESC, id DESC
      LIMIT ?`,
-  )
-    .bind(limit)
-    .all<FetchRun>();
-  return results;
+    [limit],
+  );
 }
 
 export async function getLatestSuccessfulRun(env: Bindings): Promise<FetchRun | null> {
-  return env.DB.prepare(
+  const rows = await readRows<FetchRun>(
+    env,
     `SELECT * FROM fetch_runs
      WHERE status = 'success'
        AND default_winner_model_key IS NOT NULL
      ORDER BY completed_at DESC, id DESC
      LIMIT 1`,
-  ).first<FetchRun>();
+  );
+  return rows[0] ?? null;
 }
 
 export async function getResultsForRun(env: Bindings, runId: number): Promise<ParsedModelResult[]> {
-  const { results = [] } = await env.DB.prepare(
+  const results = await readRows<ModelResultRow>(
+    env,
     `SELECT * FROM model_results
      WHERE run_id = ?
      ORDER BY name ASC`,
-  )
-    .bind(runId)
-    .all<ModelResultRow>();
+    [runId],
+  );
 
   return results.map(rowToModelResult);
 }
 
 export async function getModelSummaries(env: Bindings): Promise<ModelSummary[]> {
-  const { results = [] } = await env.DB.prepare(
-    `SELECT
-        mr.model_key,
-        mr.name,
-        COUNT(*) AS samples,
-        MAX(fr.completed_at) AS latest_at
-     FROM model_results mr
-     JOIN fetch_runs fr ON fr.id = mr.run_id
-     WHERE fr.status = 'success'
-       AND ${SCOREABLE_SQL}
-     GROUP BY mr.model_key
-     ORDER BY LOWER(mr.name) ASC`,
-  ).all<ModelSummary>();
-
-  return results;
+  return cachedRead(["model-summaries"], 5 * 60, async () => {
+    // Aggregate immutable batches, not the entire model history every time the
+    // list refreshes. Only the newest/retention boundary batches normally change.
+    const runs = await getSuccessfulTimelineRuns(env, 2_147_483_647);
+    const models = new Map<string, ModelSummary>();
+    for (const ids of batchRunIds(runs.map((run) => run.id))) {
+      const summaries = await readRows<ModelSummary>(
+        env,
+        `SELECT mr.model_key, mr.name, COUNT(*) AS samples, MAX(fr.completed_at) AS latest_at
+         FROM model_results mr
+         JOIN fetch_runs fr ON fr.id = mr.run_id
+         WHERE mr.run_id IN (${ids.map(() => "?").join(", ")})
+           AND fr.status = 'success'
+           AND ${SCOREABLE_SQL}
+         GROUP BY mr.model_key`,
+        ids,
+        24 * 60 * 60,
+      );
+      for (const summary of summaries) {
+        const previous = models.get(summary.model_key);
+        if (!previous) {
+          models.set(summary.model_key, { ...summary });
+          continue;
+        }
+        previous.samples += summary.samples;
+        if ((summary.latest_at ?? "") > (previous.latest_at ?? "")) {
+          previous.name = summary.name;
+          previous.latest_at = summary.latest_at;
+        }
+      }
+    }
+    return [...models.values()].sort((a, b) => a.name.localeCompare(b.name));
+  });
 }
 
 export async function getTimelineForModel(
@@ -712,7 +732,8 @@ export async function getTimelineForModel(
   modelKey: string,
   limit = 1000,
 ): Promise<TimelineResult[]> {
-  const { results = [] } = await env.DB.prepare(
+  const results = await readRows<ModelResultRow & TimelineColumns>(
+    env,
     `SELECT
         mr.*,
         fr.id AS timeline_run_id,
@@ -725,9 +746,9 @@ export async function getTimelineForModel(
        AND ${SCOREABLE_SQL}
      ORDER BY fr.completed_at ASC, fr.id ASC
      LIMIT ?`,
-  )
-    .bind(modelKey, limit)
-    .all<ModelResultRow & TimelineColumns>();
+    [modelKey, limit],
+    5 * 60,
+  );
 
   return results.map(rowToTimelineResult);
 }
@@ -736,18 +757,16 @@ export async function getSuccessfulTimelineRuns(
   env: Bindings,
   limit = 500,
 ): Promise<TimelineRun[]> {
-  const { results = [] } = await env.DB.prepare(
+  return readRows<TimelineRun>(
+    env,
     `SELECT fr.id, fr.started_at, fr.completed_at
      FROM fetch_runs fr
      WHERE fr.status = 'success'
        AND fr.default_winner_model_key IS NOT NULL
      ORDER BY fr.completed_at DESC, fr.id DESC
      LIMIT ?`,
-  )
-    .bind(limit)
-    .all<TimelineRun>();
-
-  return results;
+    [limit],
+  );
 }
 
 /**
@@ -759,7 +778,8 @@ export async function getDefaultWinnerTimeline(
   env: Bindings,
   limit = 500,
 ): Promise<TimelineResult[]> {
-  const { results = [] } = await env.DB.prepare(
+  const results = await readRows<ScoreModelResultRow & TimelineColumns>(
+    env,
     `SELECT
         mr.run_id,
         mr.model_key,
@@ -783,9 +803,9 @@ export async function getDefaultWinnerTimeline(
        AND fr.default_winner_model_key IS NOT NULL
      ORDER BY fr.completed_at DESC, fr.id DESC
      LIMIT ?`,
-  )
-    .bind(limit)
-    .all<ScoreModelResultRow & TimelineColumns>();
+    [limit],
+    5 * 60,
+  );
 
   return results.map(rowToScoreTimelineResult);
 }
@@ -799,11 +819,14 @@ export async function getTimelineResultsForRuns(
   env: Bindings,
   runIds: number[],
 ): Promise<TimelineResult[]> {
-  const ids = [...new Set(runIds)].filter((id) => Number.isInteger(id) && id > 0);
+  const ids = [...new Set(runIds)]
+    .filter((id) => Number.isInteger(id) && id > 0)
+    .sort((a, b) => a - b);
   if (ids.length === 0) return [];
 
   const placeholders = ids.map(() => "?").join(", ");
-  const { results = [] } = await env.DB.prepare(
+  const results = await readRows<ScoreModelResultRow & TimelineColumns>(
+    env,
     `SELECT
         mr.run_id,
         mr.model_key,
@@ -825,9 +848,11 @@ export async function getTimelineResultsForRuns(
        AND fr.status = 'success'
        AND ${SCOREABLE_SQL}
      ORDER BY fr.completed_at ASC, fr.id ASC, LOWER(mr.name) ASC`,
-  )
-    .bind(...ids)
-    .all<ScoreModelResultRow & TimelineColumns>();
+    ids,
+    // Callers supply successful runs only. Their scoring columns are immutable;
+    // retention is respected by the fresh successful-run list at the call site.
+    24 * 60 * 60,
+  );
 
   return results.map(rowToScoreTimelineResult);
 }
@@ -940,6 +965,35 @@ function rowToScoreTimelineResult(row: ScoreModelResultRow & TimelineColumns): T
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Stable, bounded buckets shared by winner and model-summary history reads. */
+export function batchRunIds(runIds: number[]): number[][] {
+  const batches = new Map<number, number[]>();
+  for (const id of [...new Set(runIds)].sort((a, b) => a - b)) {
+    // At most 50 ids per D1 query, below its bind/response size limits. Unlike
+    // slicing the newest-first list, adding a run does not shift every batch.
+    const bucket = Math.floor(id / 50);
+    const ids = batches.get(bucket);
+    if (ids) ids.push(id);
+    else batches.set(bucket, [id]);
+  }
+  return [...batches.values()];
+}
+
+/** Share query data across HTML/API routes and arbitrary scoring options. */
+async function readRows<T>(
+  env: Bindings,
+  query: string,
+  bindings: (string | number)[] = [],
+  ttlSeconds = 60,
+): Promise<T[]> {
+  return cachedRead([query, bindings], ttlSeconds, async () => {
+    const { results = [] } = await env.DB.prepare(query)
+      .bind(...bindings)
+      .all<T>();
+    return results;
+  });
+}
 
 async function runLimitedModelMutation(
   env: Bindings,
